@@ -20,6 +20,7 @@ import {
 const PROBE_DENSITY = 8;
 const PROBE_SAMPLES = 64;
 const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
+let probesNeedUpdate = false;
 
 (async () => {
     if (navigator.gpu === undefined) {
@@ -139,15 +140,19 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
 
     var accumBufferViews = [accumBuffers[0].createView(), accumBuffers[1].createView()];
 
-    var probeBuffer = device.createBuffer({
+    var probeBufferWrite = device.createBuffer({
         size: PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+    var probeBufferRead = device.createBuffer({
+        size: PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
 
     var probeDirtyBuffer = device.createBuffer({
         size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
 
     // Initialize probes to zero
-    device.queue.writeBuffer(probeBuffer, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
+    device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
+    device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
     device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
 
     // Setup render outputs
@@ -185,7 +190,7 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
             },
             {
                 binding: 6,
-                visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+                visibility: GPUShaderStage.COMPUTE,
                 buffer: { 
                     type: 'storage',
                     hasDynamicOffset: false,
@@ -194,6 +199,13 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
             },
             {
                 binding: 7,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: { 
+                    type: 'read-only-storage'
+                }
+            },
+            {
+                binding: 8,
                 visibility: GPUShaderStage.COMPUTE,
                 buffer: { 
                     type: 'storage',
@@ -201,6 +213,7 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
                     minBindingSize: 0
                 }
             },
+            
         ]
     });
 
@@ -258,6 +271,31 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
         }]
     };
 
+    const probeVertexState = {
+        module: shaderModule,
+        entryPoint: "probe_vertex_main",
+        buffers: []
+    };
+
+    const probeFragmentState = {
+        module: shaderModule,
+        entryPoint: "probe_fragment_main",
+        targets: [{
+            format: swapChainFormat
+        }]
+    };
+
+    const probePipeline = device.createRenderPipeline({
+        layout: layout,
+        vertex: probeVertexState,
+        fragment: probeFragmentState,
+        primitive: {
+            topology: "triangle-list",
+            cullMode: "none"
+        }
+    });
+
+
     var camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
     var proj = mat4.perspective(
         mat4.create(), 50 * Math.PI / 180.0, canvas.width / canvas.height, 0.1, 100);
@@ -314,8 +352,9 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
         // Updated each frame because we need to ping pong the accumulation buffers
         {binding: 4, resource: accumBufferViews[0]},
         {binding: 5, resource: accumBufferViews[1]},
-        {binding: 6, resource: { buffer: probeBuffer } },
-        {binding: 7, resource: { buffer: probeDirtyBuffer } }
+        {binding: 6, resource: { buffer: probeBufferWrite } },
+        {binding: 7, resource: { buffer: probeBufferRead } },
+        {binding: 8, resource: { buffer: probeDirtyBuffer } },
     ];
 
     var bindGroup = device.createBindGroup({layout: bindGroupLayout, entries: bindGroupEntries});
@@ -338,9 +377,17 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
         const computePass = commandEncoder.beginComputePass();
         computePass.setPipeline(computePipeline);
         computePass.setBindGroup(0, bindGroup);
-        computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY**3 / 64));
+
+        const workgroupSize = 8;
+        const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
+        computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
+
         computePass.end();
-        
+
+        const numProbes = PROBE_DENSITY ** 3;
+        const floatsPerProbe = 3 + (9 * 3); // position + SH coeffs (vec3[9])
+        const bytesPerProbe = floatsPerProbe * 4;
+        commandEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, numProbes * bytesPerProbe);
         await device.queue.submit([commandEncoder.finish()]);
         await device.queue.onSubmittedWorkDone();
     }
@@ -348,6 +395,10 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
     await updateProbes(device);
 
     const render = async () => {
+        if (probesNeedUpdate) {
+            await updateProbes(device);
+            probesNeedUpdate = false;
+        }
         // Fetch a new volume or colormap if a new one was selected and update the probes
         if (volumeName != volumePicker.value) {
             volumeName = volumePicker.value;
@@ -369,9 +420,7 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
             // Reset accumulation and update the bindgroup
             frameId = 0;
             bindGroupEntries[1].resource = volumeTexture.createView();
-            await updateProbes(device).then(() => {
-                console.log("Probes initialized for ", volumeName);
-            });
+            probesNeedUpdate = true;
         }
 
         if (colormapName != colormapPicker.value) {
@@ -381,9 +430,7 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
             // Reset accumulation and update the bindgroup
             frameId = 0;
             bindGroupEntries[2].resource = colormapTexture.createView();
-            await updateProbes(device).then(() => {
-                console.log("Probes initialized for ", colormapName);
-            });
+            probesNeedUpdate = true;
         }
 
         // Update camera buffer
@@ -395,9 +442,7 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
             lightPhiValue = lightPhiSlider.value;
             lightThetaValue = lightThetaSlider.value;
             lightStrengthValue = lightStrengthSlider.value;
-            updateProbes(device).then(() => {
-                console.log("Probes initialized for ", volumeName);
-            });
+            probesNeedUpdate = true;
         }
 
         {
@@ -436,6 +481,12 @@ const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
         renderPass.setVertexBuffer(0, vertexBuffer);
         renderPass.setIndexBuffer(indexBuffer, "uint16");
         renderPass.draw(cube.vertices.length / 3, 1, 0, 0);
+
+        if (DRAW_PROBES) {
+            renderPass.setPipeline(probePipeline);
+            renderPass.setBindGroup(0, bindGroup);
+            renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
+        }
 
         renderPass.end();
         device.queue.submit([commandEncoder.finish()]);

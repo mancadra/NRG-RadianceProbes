@@ -110,9 +110,11 @@ struct ViewParams {
 // Used for accumulatinng frames over time to reduce noise
 @group(0) @binding(4) var accum_buffer_in: texture_2d<f32>;
 @group(0) @binding(5) var accum_buffer_out: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(6) var<storage, read_write> probe_data: array<Probe>;
+@group(0) @binding(6) var<storage, read_write> probe_data_write: array<Probe>;
+@group(0) @binding(7) var<storage, read> probe_data_read: array<Probe>;
 // Used for tracking the dirty state of the probe data (probes in need of an update)
-@group(0) @binding(7) var<storage, read_write> probe_dirty: atomic<u32>;
+@group(0) @binding(8) var<storage, read_write> probe_dirty: atomic<u32>;
+
 
 @vertex
 fn vertex_main(vert: VertexInput) -> VertexOutput {
@@ -339,75 +341,42 @@ fn trace_radiance(orig: float3, dir: float3, rng: ptr<function, LCGRand>) -> flo
 }
 
 /// Generates a 3D grid of probe positions within the unit cube [0,1]
-/// and calculates the radiance for each probe and stores it as spherical harmonic coefficients
-/// Returns an array of probe positions and their linear indices.
+/// Computes SH radiance at each probe and writes results to probe_data_write.
+/// Automatically clears the dirty flag after all probes are updated.
 @compute @workgroup_size(8, 8, 1)
 fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let gx = i32(global_id.x);
+    let gy = i32(global_id.y);
+    let gz = i32(global_id.z);
+
+    if (gx >= PROBE_DENSITY || gy >= PROBE_DENSITY || gz >= PROBE_DENSITY) {
+        return; // Out of bounds
+    }
+
     if (atomicLoad(&probe_dirty) == 0u) {
         return; // Probes are already up-to-date
     }
 
-    let idx = i32(global_id.x);
+    let idx = i32(gz * PROBE_DENSITY * PROBE_DENSITY + gy * PROBE_DENSITY + gx);
     let total_probes = PROBE_DENSITY * PROBE_DENSITY * PROBE_DENSITY;
-    if (idx >= total_probes) {
-        return; // Out of bounds
-    }
 
     var rng = LCGRand();
-    rng.state = u32(idx); // Deterministic seed per probe
+    rng.state = u32(idx); // Deterministic RNG seed per probe
 
-    // Calculate 3D position from linear index
-    let z = idx / (PROBE_DENSITY * PROBE_DENSITY);
-    let y = (idx % (PROBE_DENSITY * PROBE_DENSITY)) / PROBE_DENSITY;
-    let x = idx % PROBE_DENSITY;
     let step = 1.0 / f32(PROBE_DENSITY - 1);
-    let pos = float3(f32(x) * step, f32(y) * step, f32(z) * step);
+    let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
 
-    // Compute and store
-    probe_data[idx].position = pos;
-    probe_data[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
+    probe_data_write[idx].position = pos;
+    probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
 
-    // Mark as clean if last probe
-    if (idx == total_probes - 1) {
+    // Clear the dirty flag once the last probe has been written
+    if (idx == i32(total_probes - 1)) {
         atomicStore(&probe_dirty, 0u);
     }
 }
 
 @fragment
 fn fragment_main(in: VertexOutput) -> @location(0) float4 {
-    if (params.draw_probes == 1u) {
-        let volume_translation = float3(0.5) - params.volume_scale.xyz * 0.5;
-        let world_pos = (in.transformed_eye - volume_translation) / params.volume_scale.xyz;
-        
-        // Improved probe visualization parameters
-        let base_radius = 0.01; // Base size in world space
-        let min_radius = 0.002; // Minimum size in screen space
-        let brightness = 5.0;
-        
-        // Calculate adaptive radius based on distance
-        let view_dist = distance(in.transformed_eye, world_pos);
-        let adaptive_radius = max(min_radius, base_radius / view_dist);
-        
-        // Track the closest probe
-        var closest_dist = 1.0;
-        var closest_probe_idx = -1;
-        
-        // Find the closest probe
-        for (var i = 0; i < PROBE_DENSITY * PROBE_DENSITY * PROBE_DENSITY; i++) {
-            let probe_pos = probe_data[i].position;
-            let dist = distance(world_pos, probe_pos);
-            if (dist < closest_dist) {
-                closest_dist = dist;
-                closest_probe_idx = i;
-            }
-        }
-        
-        // Only draw if very close to a probe
-        if (closest_dist < adaptive_radius && closest_probe_idx >= 0) {
-            let falloff = 1.0 - smoothstep(0.0, adaptive_radius, closest_dist);
-            return float4(1.0, 0.0, 0.0, 1.0) * falloff * brightness;
-        }
-    }
     var ray_dir = normalize(in.ray_dir);
 
 	var t_interval = intersect_box(in.transformed_eye, ray_dir);
@@ -504,5 +473,45 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     color.g = linear_to_srgb(color.g);
     color.b = linear_to_srgb(color.b);
     return color;
+}
+
+
+
+@vertex
+fn probe_vertex_main(@builtin(instance_index) instanceIndex: u32, @builtin(vertex_index) vertexIndex : u32) -> VertexOutput {
+    var output : VertexOutput;
+let base_quad_size = 0.1;
+
+    // Triangle for quad (two triangles)
+    let points = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), // Bottom-left
+        vec2<f32>( 1.0, -1.0), // Bottom-right
+        vec2<f32>(-1.0,  1.0), // Top-left
+        vec2<f32>(-1.0,  1.0), // Top-left (repeated)
+        vec2<f32>( 1.0, -1.0), // Bottom-right (repeated)
+        vec2<f32>( 1.0,  1.0)  // Top-right
+    );
+
+    let probe_pos = probe_data_read[instanceIndex].position;
+    let world_center = probe_pos * params.volume_scale.xyz;
+
+    let cam_to_probe = world_center - params.eye_pos.xyz;
+    let distance = length(cam_to_probe);
+
+    let scale_factor = clamp(distance * 0.05, 0.05, 2.0); 
+
+    // Offset vertex to form quad billboard
+    let quad_vertex_offset = points[vertexIndex] * base_quad_size * scale_factor;
+    let worldPos = vec4<f32>(
+        world_center + vec3<f32>(quad_vertex_offset, 0.0),
+        1.0
+    );
+    output.position = params.proj_view * worldPos;
+    return output;
+}
+
+@fragment
+fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }
 
