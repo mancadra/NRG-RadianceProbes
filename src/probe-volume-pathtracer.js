@@ -79,7 +79,7 @@ let probesNeedUpdate = false;
     indexBuffer.unmap();
 
     // Create a buffer to store the view parameters, the buffer is padded out by 1 float
-    var viewParamsSize = (16 + 4 * 4 + 1) * 4;
+    var viewParamsSize = (16 + 4 * 4 + 6) * 4;
     var viewParamsBuffer = device.createBuffer(
         {size: viewParamsSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
 
@@ -368,7 +368,33 @@ let probesNeedUpdate = false;
     var sigmaTScale = 100.0;
     var sigmaSScale = 1.0;
 
-    async function updateProbes(device) {
+    async function updateProbes(device, frameId) {
+        projView = mat4.mul(projView, proj, camera.camera);
+
+        var lightDir = sphericalDir(lightThetaSlider.value, lightPhiSlider.value);
+        {
+            await upload.mapAsync(GPUMapMode.WRITE);
+            var eyePos = camera.eyePos();
+            var map = upload.getMappedRange();
+            var f32map = new Float32Array(map);
+            var u32map = new Uint32Array(map);
+            var i32map = new Int32Array(map);
+
+            // TODO: A struct layout size computer/writer utility would help here
+            f32map.set(projView, 0);
+            f32map.set(eyePos, 16);
+            f32map.set(volumeScale, 16 + 4);
+            f32map.set(lightDir, 16 + 4 * 2);
+            f32map.set([lightStrengthSlider.value], 16 + 4 * 2 + 3);
+            u32map[28] = frameId;
+            f32map[29] = sigmaTScale;
+            f32map[30] = sigmaSScale;
+            u32map[31] = DRAW_PROBES;
+            i32map[32] = PROBE_DENSITY;
+            i32map[33] = PROBE_SAMPLES;
+
+            upload.unmap();
+        }
         // Mark probes as dirty
         device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
         
@@ -380,7 +406,9 @@ let probesNeedUpdate = false;
 
         const workgroupSize = 8;
         const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
-        computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
+        computePass.dispatchWorkgroups(1, 1, PROBE_DENSITY);
+        //computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
+        //computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
 
         computePass.end();
 
@@ -392,13 +420,9 @@ let probesNeedUpdate = false;
         await device.queue.onSubmittedWorkDone();
     }
 
-    await updateProbes(device);
+    await updateProbes(device, 0);
 
     const render = async () => {
-        if (probesNeedUpdate) {
-            await updateProbes(device);
-            probesNeedUpdate = false;
-        }
         // Fetch a new volume or colormap if a new one was selected and update the probes
         if (volumeName != volumePicker.value) {
             volumeName = volumePicker.value;
@@ -451,6 +475,7 @@ let probesNeedUpdate = false;
             var map = upload.getMappedRange();
             var f32map = new Float32Array(map);
             var u32map = new Uint32Array(map);
+            var i32map = new Int32Array(map);
 
             // TODO: A struct layout size computer/writer utility would help here
             f32map.set(projView, 0);
@@ -458,11 +483,19 @@ let probesNeedUpdate = false;
             f32map.set(volumeScale, 16 + 4);
             f32map.set(lightDir, 16 + 4 * 2);
             f32map.set([lightStrengthSlider.value], 16 + 4 * 2 + 3);
-            u32map.set([frameId], 16 + 4 * 3);
-            f32map.set([sigmaTScale, sigmaSScale], 16 + 4 * 3 + 1);
-            u32map.set([DRAW_PROBES], 16 + 4 * 3 + 3);
+            u32map[28] = frameId;
+            f32map[29] = sigmaTScale;
+            f32map[30] = sigmaSScale;
+            u32map[31] = DRAW_PROBES;
+            i32map[32] = PROBE_DENSITY;
+            i32map[33] = PROBE_SAMPLES;
 
             upload.unmap();
+        }
+
+        if (probesNeedUpdate, frameId) {
+            await updateProbes(device);
+            probesNeedUpdate = false;
         }
 
         bindGroupEntries[4].resource = accumBufferViews[frameId % 2];

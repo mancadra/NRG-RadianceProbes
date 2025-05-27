@@ -1,6 +1,6 @@
 const M_PI: f32 = 3.14159265358979323846;
-const PROBE_DENSITY: i32 = 8; // Number of probes in each dimension
-const PROBE_SAMPLES: i32 = 64; // Number of samples/rays per probe
+const PROBE_DENSITY = 8; // Number of probes in each dimension
+const PROBE_SAMPLES = 64;
 
 // Reduce clutter/keyboard pain
 alias float2 = vec2<f32>;
@@ -101,6 +101,8 @@ struct ViewParams {
     sigma_t_scale: f32,
     sigma_s_scale: f32,
     draw_probes: u32,
+    probe_density: i32,
+    probe_samples: i32,
 };
 
 @group(0) @binding(0) var<uniform> params: ViewParams;
@@ -128,7 +130,7 @@ fn vertex_main(vert: VertexInput) -> VertexOutput {
     out.transformed_eye = (params.eye_pos.xyz - volume_translation) / params.volume_scale.xyz;
     out.ray_dir = vert.position - out.transformed_eye;
     return out;
-};
+}
 
 fn intersect_box(orig: float3, dir: float3) -> float2 {
 	var box_min = float3(0.0);
@@ -161,15 +163,14 @@ struct SamplingResult {
     scattering_event: bool,
     color: float3,
     transmittance: f32,
-};
+}
 
 fn sample_woodcock(orig: float3,
                    dir: float3,
                    interval: float2,
                    t: ptr<function, f32>,
                    rng: ptr<function, LCGRand>)
-                   -> SamplingResult
-{
+                   -> SamplingResult {
     var result: SamplingResult;
     result.scattering_event = false;
     result.color = float3(0.0);
@@ -202,8 +203,7 @@ fn sample_woodcock(orig: float3,
 fn delta_tracking_transmittance(orig: float3,
                                 dir: float3,
                                 interval: float2,
-                                rng: ptr<function, LCGRand>) -> f32
-{
+                                rng: ptr<function, LCGRand>) -> f32 {
     var transmittance = 1.0;
     var t = interval.x;
     loop {
@@ -227,8 +227,7 @@ fn delta_tracking_transmittance(orig: float3,
 fn ratio_tracking_transmittance(orig: float3,
                                 dir: float3,
                                 interval: float2,
-                                rng: ptr<function, LCGRand>) -> f32
-{
+                                rng: ptr<function, LCGRand>) -> f32 {
     var transmittance = 1.0;
     var t = interval.x;
     loop {
@@ -280,15 +279,15 @@ fn compute_probe_radiance(probe_pos: float3, rng: ptr<function, LCGRand>) -> SHC
     sh_coeffs.L21 = float3(0.0); sh_coeffs.L22 = float3(0.0);
 
     // Sample radiance from random directions
-    for (var i: i32 = 0; i < PROBE_SAMPLES; i += 1) {
+    for (var i: i32 = 0; i < params.probe_samples; i += 1) {
         let dir = sample_spherical_direction(float2(lcg_randomf(rng), lcg_randomf(rng)));
         var radiance = trace_radiance(probe_pos, dir, rng);
 
         // Evaluate SH basis for this direction
         let basis = sh_eval_basis(dir);
 
-        // Accumulate into SH coefficients (weighted by solid angle: 4π/PROBE_SAMPLES)
-        let weight = 4.0 * M_PI / f32(PROBE_SAMPLES);
+        // Accumulate into SH coefficients (weighted by solid angle: 4π/params.probe_samples)
+        let weight = 4.0 * M_PI / f32(params.probe_samples);
         sh_coeffs.L00 += radiance * basis.L00 * weight;
         sh_coeffs.L1m1 += radiance * basis.L1m1 * weight;
         sh_coeffs.L10 += radiance * basis.L10 * weight;
@@ -349,7 +348,8 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let gy = i32(global_id.y);
     let gz = i32(global_id.z);
 
-    if (gx >= PROBE_DENSITY || gy >= PROBE_DENSITY || gz >= PROBE_DENSITY) {
+
+    if (gx >= params.probe_density || gy >= params.probe_density || gz >= params.probe_density) {
         return; // Out of bounds
     }
 
@@ -357,13 +357,13 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return; // Probes are already up-to-date
     }
 
-    let idx = i32(gz * PROBE_DENSITY * PROBE_DENSITY + gy * PROBE_DENSITY + gx);
-    let total_probes = PROBE_DENSITY * PROBE_DENSITY * PROBE_DENSITY;
+    let idx = i32(gz * params.probe_density * params.probe_density + gy * params.probe_density + gx);
+    let total_probes = params.probe_density * params.probe_density * params.probe_density;
 
     var rng = LCGRand();
     rng.state = u32(idx); // Deterministic RNG seed per probe
 
-    let step = 1.0 / f32(PROBE_DENSITY - 1);
+    let step = 1.0 / f32(params.probe_density - 1);
     let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
 
     probe_data_write[idx].position = pos;
@@ -475,12 +475,13 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     return color;
 }
 
-
-
 @vertex
-fn probe_vertex_main(@builtin(instance_index) instanceIndex: u32, @builtin(vertex_index) vertexIndex : u32) -> VertexOutput {
+fn probe_vertex_main(
+    @builtin(instance_index) instanceIndex: u32,
+    @builtin(vertex_index) vertexIndex: u32
+) -> VertexOutput {
     var output : VertexOutput;
-let base_quad_size = 0.1;
+    let base_quad_size = 0.08;
 
     // Triangle for quad (two triangles)
     let points = array<vec2<f32>, 6>(
@@ -495,23 +496,26 @@ let base_quad_size = 0.1;
     let probe_pos = probe_data_read[instanceIndex].position;
     let world_center = probe_pos * params.volume_scale.xyz;
 
-    let cam_to_probe = world_center - params.eye_pos.xyz;
-    let distance = length(cam_to_probe);
+    // Compute view-aligned billboard axes
+    let cam_forward = normalize(params.eye_pos.xyz); // view direction
+    let cam_right = normalize(cross(cam_forward, vec3<f32>(0.0, 1.0, 0.0)));
+    let cam_up = cross(cam_right, cam_forward);
 
-    let scale_factor = clamp(distance * 0.05, 0.05, 2.0); 
+    let distance = length(world_center - params.eye_pos.xyz);
+    let scale_factor = clamp(distance * 0.05, 0.05, 2.0);
 
-    // Offset vertex to form quad billboard
-    let quad_vertex_offset = points[vertexIndex] * base_quad_size * scale_factor;
-    let worldPos = vec4<f32>(
-        world_center + vec3<f32>(quad_vertex_offset, 0.0),
-        1.0
-    );
+    // Apply screen-facing quad orientation
+    let quad_offset = (cam_right * points[vertexIndex].x + cam_up * points[vertexIndex].y)
+                      * base_quad_size * scale_factor;
+
+    let worldPos = vec4<f32>(world_center + quad_offset, 1.0);
     output.position = params.proj_view * worldPos;
     return output;
 }
 
+
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
 }
 
