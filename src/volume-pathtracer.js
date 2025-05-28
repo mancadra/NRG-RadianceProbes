@@ -16,6 +16,9 @@ import {
     volumes
 } from "./volume.js";
 
+let renderCount = 0;
+let sumTime = 0;
+
 export default async function runPathTracer() {
     if (navigator.gpu === undefined) {
         document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
@@ -281,6 +284,8 @@ export default async function runPathTracer() {
     var sigmaSScale = 1.0;
 
     const render = async () => {
+        const start = performance.now();
+
         // Fetch a new volume or colormap if a new one was selected
         if (volumeName != volumePicker.value) {
             volumeName = volumePicker.value;
@@ -360,6 +365,15 @@ export default async function runPathTracer() {
 
         frameId += 1;
         requestAnimationFrame(render);
+
+        const end = performance.now();
+        sumTime += end - start;
+        renderCount++;
+        if (renderCount == 1000) {
+            console.log(`Average render time for path tracer: \n${sumTime / renderCount} ms`);
+            sumTime = 0;
+            renderCount = 0;
+        }
     };
     requestAnimationFrame(render);
 }

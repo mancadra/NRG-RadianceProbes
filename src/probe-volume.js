@@ -18,6 +18,9 @@ import {
 } from "./volume.js";
 
 let probesNeedUpdate = false;
+let renderCount = 0;
+let sumTime = 0;
+const MAX_PROBE_DENSITY = 64;
 
 export default async function runProbeRenderer() {
     let DRAW_PROBES = parseInt(document.getElementById("drawProbes").value);
@@ -146,6 +149,22 @@ export default async function runProbeRenderer() {
     var accumBufferViews = [accumBuffers[0].createView(), accumBuffers[1].createView()];
 
     var probeBufferWrite = device.createBuffer({
+        size: MAX_PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+    var probeBufferRead = device.createBuffer({
+        size: MAX_PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+
+    var probeDirtyBuffer = device.createBuffer({
+        size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+
+    // Initialize probes to zero
+    device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+    device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+    device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
+
+    /*
+    var probeBufferWrite = device.createBuffer({
         size: PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
     var probeBufferRead = device.createBuffer({
@@ -159,6 +178,7 @@ export default async function runProbeRenderer() {
     device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
     device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
     device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
+    */
 
     // Setup render outputs
     var swapChainFormat = "bgra8unorm";
@@ -374,6 +394,7 @@ export default async function runProbeRenderer() {
     var sigmaSScale = 1.0;
 
     async function updateProbes(device, frameId) {
+        const start = performance.now();
         projView = mat4.mul(projView, proj, camera.camera);
 
         var lightDir = sphericalDir(lightThetaSlider.value, lightPhiSlider.value);
@@ -411,7 +432,8 @@ export default async function runProbeRenderer() {
 
         const workgroupSize = 8;
         const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
-        computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
+        computePass.dispatchWorkgroups(1, 1, 8);
+        //computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
         //computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
 
         computePass.end();
@@ -422,11 +444,17 @@ export default async function runProbeRenderer() {
         commandEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, numProbes * bytesPerProbe);
         await device.queue.submit([commandEncoder.finish()]);
         await device.queue.onSubmittedWorkDone();
+
+        const end = performance.now();
+        const time = end - start;
+        console.log(`Probe initialization time(probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES}): \n${time} ms`);
     }
 
     await updateProbes(device, 0);
 
     const render = async () => {
+        const start = performance.now();
+
         // Fetch a new volume or colormap if a new one was selected and update the probes
         if (volumeName != volumePicker.value) {
             volumeName = volumePicker.value;
@@ -508,7 +536,9 @@ export default async function runProbeRenderer() {
             upload.unmap();
         }
 
-        if (probesNeedUpdate, frameId) {
+        if (probesNeedUpdate == true) {
+            device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+            device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
             await updateProbes(device);
             probesNeedUpdate = false;
         }
@@ -533,7 +563,7 @@ export default async function runProbeRenderer() {
         if (DRAW_PROBES) {
             renderPass.setPipeline(probePipeline);
             renderPass.setBindGroup(0, bindGroup);
-            renderPass.draw(8, PROBE_DENSITY ** 3, 0, 0);
+            renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
         }
 
         renderPass.end();
@@ -541,6 +571,15 @@ export default async function runProbeRenderer() {
 
         frameId += 1;
         requestAnimationFrame(render);
+
+        const end = performance.now();
+        sumTime += end - start;
+        renderCount++;
+        if (renderCount == 1000) {
+            console.log(`Average render time for radiance probes (probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES}): \n${sumTime / renderCount} ms`);
+            sumTime = 0;
+            renderCount = 0;
+        }
     };
     requestAnimationFrame(render);
 }

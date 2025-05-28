@@ -347,30 +347,37 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let gy = i32(global_id.y);
     let gz = i32(global_id.z);
 
-
+    var activeT = true;
     if (gx >= params.probe_density || gy >= params.probe_density || gz >= params.probe_density) {
-        return; // Out of bounds
+        activeT = false; // Out of bounds
     }
-
     if (atomicLoad(&probe_dirty) == 0u) {
-        return; // Probes are already up-to-date
+        activeT = false; // Probes are already up-to-date
     }
 
     let idx = i32(gz * params.probe_density * params.probe_density + gy * params.probe_density + gx);
     let total_probes = params.probe_density * params.probe_density * params.probe_density;
 
-    var rng = LCGRand();
-    rng.state = u32(idx); // Deterministic RNG seed per probe
+    if (activeT) {
+        var rng = LCGRand();
+        rng.state = u32(idx); // Deterministic RNG seed per probe
 
-    let step = 1.0 / f32(params.probe_density - 1);
-    let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
+        let step = 1.0 / f32(params.probe_density - 1);
+        let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
 
-    probe_data_write[idx].position = pos;
-    probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
+        probe_data_write[idx].position = pos;
+        probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
+    }
 
-    // Clear the dirty flag once the last probe has been written
-    if (idx == i32(total_probes - 1)) {
-        atomicStore(&probe_dirty, 0u);
+    // All threads reach the barrier
+    workgroupBarrier();
+    
+    // Only first thread in workgroup handles the flag clearing
+    if (global_id.x == 0u && global_id.y == 0u && global_id.z == 0u) {
+        if (atomicLoad(&probe_dirty) != 0u) {
+            // No need for storageBarrier here - atomicStore has release semantics
+            atomicStore(&probe_dirty, 0u);
+        }
     }
 }
 
@@ -527,6 +534,7 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     return color;
 }*/
 
+
 @fragment
 fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     var ray_dir = normalize(in.ray_dir);
@@ -600,6 +608,7 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
 
     var color = float4(illum, 1.0);
 
+    
     // Accumulate into the accumulation buffer for progressive accumulation 
     var accum_color = float4(0.0);
     if (params.frame_id > 0u) {
@@ -609,6 +618,7 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     textureStore(accum_buffer_out, pixel, accum_color);
 
     color = accum_color / f32(params.frame_id + 1u);
+    
 
     // TODO: background color also needs to be sRGB-mapped, otherwise this
     // causes the volume bounding box to show up incorrectly b/c of the
@@ -618,109 +628,6 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     color.b = linear_to_srgb(color.b);
     return color;
 }
-
-
-/*
-@fragment
-fn fragment_main(in: VertexOutput) -> @location(0) float4 {
-    var ray_dir = normalize(in.ray_dir);
-
-	var t_interval = intersect_box(in.transformed_eye, ray_dir);
-	if (t_interval.x > t_interval.y) {
-		discard;
-	}
-	t_interval.x = max(t_interval.x, 0.0);
-
-    let pixel = int2(i32(in.position.x), i32(in.position.y));
-    // Image will be no larger than 1280x720 so we can keep this fixed
-    // for picking our RNG value
-    var rng = get_rng(params.frame_id, pixel, int2(1280, 720));
-
-    // This should just be 1 for the max density in scivis
-    var inv_max_density = 1.0;
-
-    let light_dir = params.light_dir.xyz;
-    let light_emission = params.light_dir.w;
-    let ambient_strength = 0.0;
-    let volume_emission = 0.5;
-
-    var illum = float3(0.0);
-    var throughput = float3(1.0);
-    var transmittance = 1.0;
-
-    var had_any_event = false;
-    var pos = in.transformed_eye;
-    // Sample the next scattering event in the volume
-    for (var i = 0; i < 4; i += 1) {
-        var t = t_interval.x;
-        var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
-
-        if (!event.scattering_event) {
-            // Illuminate with an "environment light"
-            if (had_any_event) {
-                illum += throughput * float3(ambient_strength);
-            } else {
-                illum = float3(0.1);
-            }
-            break;
-        } else {
-            had_any_event = true;
-
-            // Update scattered ray position
-            pos = pos + ray_dir * t;
-
-            // Sample illumination from the direct light
-            t_interval = intersect_box(pos, light_dir);
-            // We're inside the volume
-            t_interval.x = 0.0;
-            /*
-            var light_transmittance =
-                ratio_tracking_transmittance(pos, light_dir, t_interval, &rng);
-            */
-            var light_transmittance =
-                delta_tracking_transmittance(pos, light_dir, t_interval, &rng);
-            illum += throughput * light_transmittance * float3(light_emission);
-
-            // Include emission from the volume for emission/absorption scivis model
-            // Scaling the volume emission by the inverse of the opacity from the transfer function
-            // can give some nice effects. Would be cool to provide control of this
-            illum += throughput * event.color * volume_emission;// * (1.0 - event.transmittance);
-
-            throughput *= event.color * event.transmittance * params.sigma_s_scale;
-
-            // Scatter in a random direction to continue the ray
-            ray_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
-            t_interval = intersect_box(pos, ray_dir);
-            if (t_interval.x > t_interval.y) {
-                illum = float3(0.0, 1.0, 0.0);
-                break;
-            }
-            // We're now inside the volume
-            t_interval.x = 0.0;
-        }
-    }
-
-    var color = float4(illum, 1.0);
-
-    // Accumulate into the accumulation buffer for progressive accumulation 
-    var accum_color = float4(0.0);
-    if (params.frame_id > 0u) {
-        accum_color = textureLoad(accum_buffer_in, pixel, 0);
-    }
-    accum_color += color;
-    textureStore(accum_buffer_out, pixel, accum_color);
-
-    color = accum_color / f32(params.frame_id + 1u);
-
-    // TODO: background color also needs to be sRGB-mapped, otherwise this
-    // causes the volume bounding box to show up incorrectly b/c of the
-    // differing brightness
-    color.r = linear_to_srgb(color.r);
-    color.g = linear_to_srgb(color.g);
-    color.b = linear_to_srgb(color.b);
-    return color;
-}
-*/
 
 @vertex
 fn probe_vertex_main(
