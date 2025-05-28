@@ -16,12 +16,14 @@ import {
     volumes
 } from "./volume.js";
 
-(async () => {
+export default async function runPathTracer() {
     if (navigator.gpu === undefined) {
         document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
         document.getElementById("no-webgpu").setAttribute("style", "display:block;");
         return;
     }
+
+    console.log("path tracing");
 
     var adapter = await navigator.gpu.requestAdapter();
     if (!adapter) {
@@ -360,4 +362,4 @@ import {
         requestAnimationFrame(render);
     };
     requestAnimationFrame(render);
-})();
+}

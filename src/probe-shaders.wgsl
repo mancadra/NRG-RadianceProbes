@@ -1,6 +1,4 @@
 const M_PI: f32 = 3.14159265358979323846;
-const PROBE_DENSITY = 8; // Number of probes in each dimension
-const PROBE_SAMPLES = 64;
 
 // Reduce clutter/keyboard pain
 alias float2 = vec2<f32>;

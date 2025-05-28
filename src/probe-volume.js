@@ -17,17 +17,22 @@ import {
     volumes
 } from "./volume.js";
 
-const PROBE_DENSITY = 16;
-const PROBE_SAMPLES = 64;
-const DRAW_PROBES = 0;    // 1 to draw probes, 0 to not draw probes
 let probesNeedUpdate = false;
 
-(async () => {
+export default async function runProbeRenderer() {
+    let DRAW_PROBES = parseInt(document.getElementById("drawProbes").value);
+    let PROBE_DENSITY = parseInt(document.getElementById("probeDensity").value);
+    let PROBE_SAMPLES = parseInt(document.getElementById("probeSamples").value);
+
     if (navigator.gpu === undefined) {
         document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
         document.getElementById("no-webgpu").setAttribute("style", "display:block;");
         return;
     }
+
+    console.log("radiance probes");
+    console.log("PROBE_DENSITY", PROBE_DENSITY);
+    console.log("PROBE_SAMPLES", PROBE_SAMPLES);
 
     var adapter = await navigator.gpu.requestAdapter();
     if (!adapter) {
@@ -468,6 +473,17 @@ let probesNeedUpdate = false;
             probesNeedUpdate = true;
         }
 
+        let draw_probes_value = document.getElementById("drawProbes").checked ? 1 : 0;
+        if (DRAW_PROBES != draw_probes_value) {
+            DRAW_PROBES = draw_probes_value;
+        }
+
+        if (PROBE_DENSITY != parseInt(document.getElementById("probeDensity").value) || PROBE_SAMPLES != parseInt(document.getElementById("probeSamples").value)) {
+            PROBE_DENSITY = parseInt(document.getElementById("probeDensity").value);
+            PROBE_SAMPLES = parseInt(document.getElementById("probeSamples").value);
+            probesNeedUpdate = true;
+        }
+
         {
             await upload.mapAsync(GPUMapMode.WRITE);
             var eyePos = camera.eyePos();
@@ -527,4 +543,4 @@ let probesNeedUpdate = false;
         requestAnimationFrame(render);
     };
     requestAnimationFrame(render);
-})();
+}
