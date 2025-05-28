@@ -17,9 +17,9 @@ import {
     volumes
 } from "./volume.js";
 
-const PROBE_DENSITY = 8;
+const PROBE_DENSITY = 16;
 const PROBE_SAMPLES = 64;
-const DRAW_PROBES = 1;    // 1 to draw probes, 0 to not draw probes
+const DRAW_PROBES = 0;    // 1 to draw probes, 0 to not draw probes
 let probesNeedUpdate = false;
 
 (async () => {
@@ -406,8 +406,7 @@ let probesNeedUpdate = false;
 
         const workgroupSize = 8;
         const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
-        computePass.dispatchWorkgroups(1, 1, PROBE_DENSITY);
-        //computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
+        computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
         //computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
 
         computePass.end();
@@ -518,7 +517,7 @@ let probesNeedUpdate = false;
         if (DRAW_PROBES) {
             renderPass.setPipeline(probePipeline);
             renderPass.setBindGroup(0, bindGroup);
-            renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
+            renderPass.draw(8, PROBE_DENSITY ** 3, 0, 0);
         }
 
         renderPass.end();

@@ -3,7 +3,7 @@ const path = require("path");
 
 module.exports = {
     //entry: "./src/volume-pathtracer.js",
-    entry: "./src/probe-volume-pathtracer.js",
+    entry: "./src/probe-volume.js",
     mode: "development",
     output: {
         filename: "main.js",

@@ -90,6 +90,7 @@ struct VertexOutput {
     @builtin(position) position: float4,
     @location(0) transformed_eye: float3,
     @location(1) ray_dir: float3,
+    @location(2) color: vec3<f32>,
 };
 
 struct ViewParams {
@@ -375,6 +376,253 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 }
 
+// Add this function to evaluate SH at a given direction using stored coefficients
+fn sh_eval(sh: SHCoefficients, dir: float3) -> float3 {
+    let basis = sh_eval_basis(dir);
+    return sh.L00 * basis.L00 +
+           sh.L1m1 * basis.L1m1 + sh.L10 * basis.L10 + sh.L11 * basis.L11 +
+           sh.L2m2 * basis.L2m2 + sh.L2m1 * basis.L2m1 + sh.L20 * basis.L20 +
+           sh.L21 * basis.L21 + sh.L22 * basis.L22;
+}
+
+// Helper function to get probe index from grid coordinates
+fn get_probe_index(ix: i32, iy: i32, iz: i32) -> i32 {
+    return iz * params.probe_density * params.probe_density + 
+           iy * params.probe_density + 
+           ix;
+}
+
+// Helper function to clamp grid coordinates
+fn clamp_probe_coord(coord: i32) -> i32 {
+    return clamp(coord, 0, params.probe_density - 1);
+}
+
+// Main function to get interpolated radiance from probes
+fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
+    // Calculate normalized position in probe grid space [0, 1] -> [0, density-1]
+    let grid_pos = pos * f32(params.probe_density - 1);
+    
+    // Get the 8 surrounding probes
+    let ix0 = i32(floor(grid_pos.x));
+    let iy0 = i32(floor(grid_pos.y));
+    let iz0 = i32(floor(grid_pos.z));
+    let ix1 = clamp_probe_coord(ix0 + 1);
+    let iy1 = clamp_probe_coord(iy0 + 1);
+    let iz1 = clamp_probe_coord(iz0 + 1);
+    
+    // Get interpolation weights
+    let fx = fract(grid_pos.x);
+    let fy = fract(grid_pos.y);
+    let fz = fract(grid_pos.z);
+    
+    // Get all 8 probes
+    let p000 = probe_data_read[get_probe_index(ix0, iy0, iz0)].sh_coeffs;
+    let p001 = probe_data_read[get_probe_index(ix0, iy0, iz1)].sh_coeffs;
+    let p010 = probe_data_read[get_probe_index(ix0, iy1, iz0)].sh_coeffs;
+    let p011 = probe_data_read[get_probe_index(ix0, iy1, iz1)].sh_coeffs;
+    let p100 = probe_data_read[get_probe_index(ix1, iy0, iz0)].sh_coeffs;
+    let p101 = probe_data_read[get_probe_index(ix1, iy0, iz1)].sh_coeffs;
+    let p110 = probe_data_read[get_probe_index(ix1, iy1, iz0)].sh_coeffs;
+    let p111 = probe_data_read[get_probe_index(ix1, iy1, iz1)].sh_coeffs;
+    
+    // Evaluate SH for each probe
+    let c000 = sh_eval(p000, dir);
+    let c001 = sh_eval(p001, dir);
+    let c010 = sh_eval(p010, dir);
+    let c011 = sh_eval(p011, dir);
+    let c100 = sh_eval(p100, dir);
+    let c101 = sh_eval(p101, dir);
+    let c110 = sh_eval(p110, dir);
+    let c111 = sh_eval(p111, dir);
+    
+    // Trilinear interpolation
+    let c00 = mix(c000, c100, fx);
+    let c01 = mix(c001, c101, fx);
+    let c10 = mix(c010, c110, fx);
+    let c11 = mix(c011, c111, fx);
+    
+    let c0 = mix(c00, c10, fy);
+    let c1 = mix(c01, c11, fy);
+    
+    return mix(c0, c1, fz);
+}
+
+/*
+// Modified fragment_main to use probe-based illumination
+@fragment
+fn fragment_main(in: VertexOutput) -> @location(0) float4 {
+    var ray_dir = normalize(in.ray_dir);
+    let light_dir = params.light_dir.xyz;
+    let light_emission = params.light_dir.w;
+
+    var t_interval = intersect_box(in.transformed_eye, ray_dir);
+    if (t_interval.x > t_interval.y) {
+        discard;
+    }
+    t_interval.x = max(t_interval.x, 0.0);
+
+    let pixel = int2(i32(in.position.x), i32(in.position.y));
+    var rng = get_rng(params.frame_id, pixel, int2(1280, 720));
+
+    var illum = float3(0.0);
+    var throughput = float3(1.0);
+    var transmittance = 1.0;
+    var had_any_event = false;
+    var pos = in.transformed_eye;
+
+    // Sample the next scattering event in the volume
+    for (var i = 0; i < 4; i += 1) {
+        var t = t_interval.x;
+        var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
+
+        if (!event.scattering_event) {
+            // Use probe-based illumination for environment
+            if (had_any_event) {
+                illum += throughput * get_interpolated_radiance(pos, ray_dir);
+            } else {
+                illum = float3(0.1); // Fallback ambient
+            }
+            break;
+        } else {
+            had_any_event = true;
+            pos = pos + ray_dir * t;
+
+            // Sample direct light (optional - can also use probes for this)
+            t_interval = intersect_box(pos, light_dir);
+            t_interval.x = 0.0;
+            var light_transmittance = delta_tracking_transmittance(pos, light_dir, t_interval, &rng);
+            illum += throughput * light_transmittance * float3(light_emission);
+
+            // Use probe-based illumination for indirect light
+            let bounce_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
+            illum += throughput * event.color * get_interpolated_radiance(pos, bounce_dir);
+
+            throughput *= event.color * event.transmittance * params.sigma_s_scale;
+
+            // Scatter in a random direction
+            ray_dir = bounce_dir;
+            t_interval = intersect_box(pos, ray_dir);
+            if (t_interval.x > t_interval.y) {
+                illum = float3(0.0, 1.0, 0.0);
+                break;
+            }
+            t_interval.x = 0.0;
+        }
+    }
+
+    var color = float4(illum, 1.0);
+
+    // Accumulate into the accumulation buffer
+    var accum_color = float4(0.0);
+    if (params.frame_id > 0u) {
+        accum_color = textureLoad(accum_buffer_in, pixel, 0);
+    }
+    accum_color += color;
+    textureStore(accum_buffer_out, pixel, accum_color);
+
+    color = accum_color / f32(params.frame_id + 1u);
+
+    // Convert to sRGB
+    color.r = linear_to_srgb(color.r);
+    color.g = linear_to_srgb(color.g);
+    color.b = linear_to_srgb(color.b);
+    return color;
+}*/
+
+@fragment
+fn fragment_main(in: VertexOutput) -> @location(0) float4 {
+    var ray_dir = normalize(in.ray_dir);
+
+    // Poiščemo intersekcijo žarka z volumnom (našim boundim boxom v katerem se nahaja volumen)
+	var t_interval = intersect_box(in.transformed_eye, ray_dir);  
+	if (t_interval.x > t_interval.y) {  // Če žarek ne vstopi v volumen ga ignoriramo
+		discard;
+	}
+	t_interval.x = max(t_interval.x, 0.0);
+
+    let pixel = int2(i32(in.position.x), i32(in.position.y));
+    // Image will be no larger than 1280x720 so we can keep this fixed
+    // for picking our RNG value
+    var rng = get_rng(params.frame_id, pixel, int2(1280, 720));
+
+    // This should just be 1 for the max density in scivis
+    var inv_max_density = 1.0;
+
+    let light_dir = params.light_dir.xyz;
+    let light_emission = params.light_dir.w;
+    let ambient_strength = 0.0;
+    let volume_emission = 0.5;
+
+    var illum = float3(0.0);
+    var throughput = float3(1.0);
+    var transmittance = 1.0;
+
+    var had_any_event = false;
+    var pos = in.transformed_eye;
+    // Sample the next scattering event in the volume
+    for (var i = 0; i < 4; i += 1) {
+        var t = t_interval.x;
+        var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
+
+        if (!event.scattering_event) {
+            // Illuminate with an "environment light"
+            if (had_any_event) {
+                illum += throughput * float3(ambient_strength);
+            } else {
+                illum = float3(0.1);
+            }
+            break;
+        } else {
+            had_any_event = true;
+
+            // Update scattered ray position
+            pos = pos + ray_dir * t;
+
+            var radiance = get_interpolated_radiance(pos, ray_dir);
+            illum += throughput * radiance;
+            
+            // Include emission from the volume for emission/absorption scivis model
+            // Scaling the volume emission by the inverse of the opacity from the transfer function
+            // can give some nice effects. Would be cool to provide control of this
+            illum += throughput * event.color * volume_emission;// * (1.0 - event.transmittance);
+            
+            throughput *= event.color * event.transmittance * params.sigma_s_scale;
+
+            // Scatter in a random direction to continue the ray
+            ray_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
+            t_interval = intersect_box(pos, ray_dir);
+            if (t_interval.x > t_interval.y) {
+                illum = float3(0.0, 1.0, 0.0);
+                break;
+            }
+            // We're now inside the volume
+            t_interval.x = 0.0;
+        }
+    }
+
+    var color = float4(illum, 1.0);
+
+    // Accumulate into the accumulation buffer for progressive accumulation 
+    var accum_color = float4(0.0);
+    if (params.frame_id > 0u) {
+        accum_color = textureLoad(accum_buffer_in, pixel, 0);
+    }
+    accum_color += color;
+    textureStore(accum_buffer_out, pixel, accum_color);
+
+    color = accum_color / f32(params.frame_id + 1u);
+
+    // TODO: background color also needs to be sRGB-mapped, otherwise this
+    // causes the volume bounding box to show up incorrectly b/c of the
+    // differing brightness
+    color.r = linear_to_srgb(color.r);
+    color.g = linear_to_srgb(color.g);
+    color.b = linear_to_srgb(color.b);
+    return color;
+}
+
+
+/*
 @fragment
 fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     var ray_dir = normalize(in.ray_dir);
@@ -474,6 +722,7 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     color.b = linear_to_srgb(color.b);
     return color;
 }
+*/
 
 @vertex
 fn probe_vertex_main(
@@ -510,12 +759,29 @@ fn probe_vertex_main(
 
     let worldPos = vec4<f32>(world_center + quad_offset, 1.0);
     output.position = params.proj_view * worldPos;
+    
+    let z = i32(instanceIndex) / (params.probe_density * params.probe_density);
+
+    // Color map for 8 Z-layers
+    let colors = array<vec3<f32>, 8>(
+        vec3<f32>(1.0, 1.0, 1.0), // white
+        vec3<f32>(1.0, 1.0, 0.0), // yellow
+        vec3<f32>(1.0, 0.5, 0.0), // orange
+        vec3<f32>(0.0, 1.0, 0.0), // green
+        vec3<f32>(1.0, 0.0, 0.0), // red
+        vec3<f32>(0.0, 0.0, 1.0), // blue
+        vec3<f32>(1.0, 0.0, 1.0), // pink
+        vec3<f32>(0.0, 0.0, 0.0)  // black
+    );
+    output.color = colors[z];
+
     return output;
 }
 
 
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0); // Placeholder for probe color
+    //return vec4<f32>(input.color, 1.0);
 }
 
