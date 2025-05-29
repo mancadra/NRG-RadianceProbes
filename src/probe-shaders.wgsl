@@ -648,6 +648,7 @@ fn probe_vertex_main(
     );
 
     let probe_pos = probe_data_read[instanceIndex].position;
+    let probe_const_col = probe_data_read[instanceIndex].sh_coeffs.L00;
     let world_center = probe_pos * params.volume_scale.xyz;
 
     // Compute view-aligned billboard axes
@@ -678,7 +679,8 @@ fn probe_vertex_main(
         vec3<f32>(1.0, 0.0, 1.0), // pink
         vec3<f32>(0.0, 0.0, 0.0)  // black
     );
-    output.color = colors[z];
+    //output.color = colors[z];
+    output.color = probe_const_col;
 
     return output;
 }
@@ -686,7 +688,7 @@ fn probe_vertex_main(
 
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 1.0, 0.0, 1.0); // Placeholder for probe color
-    //return vec4<f32>(input.color, 1.0);
+    //return vec4<f32>(0.0, 1.0, 0.0, 1.0); // Placeholder for probe color
+    return vec4<f32>(input.color, 1.0);
 }
 

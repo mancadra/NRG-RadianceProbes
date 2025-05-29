@@ -163,23 +163,6 @@ export default async function runProbeRenderer() {
     device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
     device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
 
-    /*
-    var probeBufferWrite = device.createBuffer({
-        size: PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
-    var probeBufferRead = device.createBuffer({
-        size: PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
-
-    var probeDirtyBuffer = device.createBuffer({
-        size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
-
-    // Initialize probes to zero
-    device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
-    device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(PROBE_DENSITY**3 * (3 + 9*3)));
-    device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
-    */
-
     // Setup render outputs
     var swapChainFormat = "bgra8unorm";
     context.configure({
@@ -390,7 +373,7 @@ export default async function runProbeRenderer() {
         mappedAtCreation: false
     });
 
-    var sigmaTScale = 100.0;
+    var sigmaTScale = 100.0;  // 100 je relativno malo če želimo videti sence
     var sigmaSScale = 1.0;
 
     async function updateProbes(device, frameId) {
