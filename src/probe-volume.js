@@ -23,9 +23,10 @@ let sumTime = 0;
 const MAX_PROBE_DENSITY = 64;
 
 export default async function runProbeRenderer() {
-    let DRAW_PROBES = parseInt(document.getElementById("drawProbes").value);
+    let DRAW_PROBES = document.getElementById("drawProbes").checked ? 1 : 0;
     let PROBE_DENSITY = parseInt(document.getElementById("probeDensity").value);
     let PROBE_SAMPLES = parseInt(document.getElementById("probeSamples").value);
+    let DRAW_VOLUME = document.getElementById("drawVolume").checked ? 1 : 0;
 
     if (navigator.gpu === undefined) {
         document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
@@ -415,8 +416,8 @@ export default async function runProbeRenderer() {
 
         const workgroupSize = 8;
         const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
-        computePass.dispatchWorkgroups(1, 1, 8);
-        //computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
+        //computePass.dispatchWorkgroups(1, 1, 8);
+        computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
         //computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
 
         computePass.end();
@@ -489,6 +490,11 @@ export default async function runProbeRenderer() {
             DRAW_PROBES = draw_probes_value;
         }
 
+        let draw_volume_value = document.getElementById("drawVolume").checked ? 1 : 0;
+        if (DRAW_VOLUME != draw_volume_value) {
+            DRAW_VOLUME = draw_volume_value;
+        }
+
         if (PROBE_DENSITY != parseInt(document.getElementById("probeDensity").value) || PROBE_SAMPLES != parseInt(document.getElementById("probeSamples").value)) {
             PROBE_DENSITY = parseInt(document.getElementById("probeDensity").value);
             PROBE_SAMPLES = parseInt(document.getElementById("probeSamples").value);
@@ -522,7 +528,7 @@ export default async function runProbeRenderer() {
         if (probesNeedUpdate == true) {
             device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
             device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
-            await updateProbes(device);
+            await updateProbes(device, frameId);
             probesNeedUpdate = false;
         }
 
@@ -537,21 +543,23 @@ export default async function runProbeRenderer() {
         renderPassDesc.colorAttachments[0].view = context.getCurrentTexture().createView();
         var renderPass = commandEncoder.beginRenderPass(renderPassDesc);
 
-        renderPass.setPipeline(renderPipeline);
-        renderPass.setBindGroup(0, bindGroup);
-        renderPass.setVertexBuffer(0, vertexBuffer);
-        renderPass.setIndexBuffer(indexBuffer, "uint16");
-        renderPass.draw(cube.vertices.length / 3, 1, 0, 0);
+        if (DRAW_VOLUME) {
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, bindGroup);
+            renderPass.setVertexBuffer(0, vertexBuffer);
+            renderPass.setIndexBuffer(indexBuffer, "uint16");
+            renderPass.draw(cube.vertices.length / 3, 1, 0, 0);
+        }
 
         if (DRAW_PROBES) {
             renderPass.setPipeline(probePipeline);
             renderPass.setBindGroup(0, bindGroup);
             renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
         }
-
+        
         renderPass.end();
         device.queue.submit([commandEncoder.finish()]);
-
+        
         frameId += 1;
         requestAnimationFrame(render);
 

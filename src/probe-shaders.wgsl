@@ -14,7 +14,7 @@ struct LCGRand {
      state: u32,
 };
 
-// Used for storing SH coefficients for probes
+// Used for storing SH coefficients for probes (we are using the second order of SH)
 struct SHCoefficients {
     L00: float3,
     L1m1: float3, L10: float3, L11: float3,
@@ -97,8 +97,8 @@ struct ViewParams {
     volume_scale: float4,
     light_dir: float4,
     frame_id: u32,
-    sigma_t_scale: f32,
-    sigma_s_scale: f32,
+    sigma_t_scale: f32, // A scaling factor for the extinction coefficient (controls the density of the volume)
+    sigma_s_scale: f32, // A scaling factor for the scattering coefficient (controls how much light scatters).
     draw_probes: u32,
     probe_density: i32,
     probe_samples: i32,
@@ -131,6 +131,7 @@ fn vertex_main(vert: VertexInput) -> VertexOutput {
     return out;
 }
 
+// Computes the intersection of a ray with a unit axis-aligned bounding box
 fn intersect_box(orig: float3, dir: float3) -> float2 {
 	var box_min = float3(0.0);
 	var box_max = float3(1.0);
@@ -164,6 +165,7 @@ struct SamplingResult {
     transmittance: f32,
 }
 
+// Uses Woodcock tracking to sample a scattering event along a ray. It may return a scattering event with color and transmittance.
 fn sample_woodcock(orig: float3,
                    dir: float3,
                    interval: float2,
@@ -199,6 +201,7 @@ fn sample_woodcock(orig: float3,
     return result;
 }
 
+// Estimates transmittance by tracking until an absorption event (returns 0 if absorbed, 1 if not).
 fn delta_tracking_transmittance(orig: float3,
                                 dir: float3,
                                 interval: float2,
@@ -223,6 +226,7 @@ fn delta_tracking_transmittance(orig: float3,
     return 1.0;
 }
 
+// Estimates transmittance by multiplying the survival probabilities at each step.
 fn ratio_tracking_transmittance(orig: float3,
                                 dir: float3,
                                 interval: float2,
@@ -268,6 +272,7 @@ fn sh_eval_basis(dir: float3) -> SHCoefficients {
     return basis;
 }
 
+// Computes the SH coefficients for radiance at a probe position by sampling random directions and tracing radiance.
 fn compute_probe_radiance(probe_pos: float3, rng: ptr<function, LCGRand>) -> SHCoefficients {
     var sh_coeffs: SHCoefficients;
 
@@ -301,6 +306,7 @@ fn compute_probe_radiance(probe_pos: float3, rng: ptr<function, LCGRand>) -> SHC
     return sh_coeffs;
 }
 
+// Traces a ray from `orig` in direction `dir` and returns the radiance (lighting) from that ray. It uses `sample_woodcock` to find a scattering event and then estimates direct lighting.
 fn trace_radiance(orig: float3, dir: float3, rng: ptr<function, LCGRand>) -> float3 {
     var t_interval = intersect_box(orig, dir);
     if (t_interval.x > t_interval.y) {
@@ -381,7 +387,7 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 }
 
-// Add this function to evaluate SH at a given direction using stored coefficients
+// Evaluates the SH for a given direction using precomputed coefficients.
 fn sh_eval(sh: SHCoefficients, dir: float3) -> float3 {
     let basis = sh_eval_basis(dir);
     return sh.L00 * basis.L00 +
@@ -402,7 +408,7 @@ fn clamp_probe_coord(coord: i32) -> i32 {
     return clamp(coord, 0, params.probe_density - 1);
 }
 
-// Main function to get interpolated radiance from probes
+// Uses trilinear interpolation of the SH coefficients from the 8 nearest probes to estimate radiance at a position and direction.
 fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     // Calculate normalized position in probe grid space [0, 1] -> [0, density-1]
     let grid_pos = pos * f32(params.probe_density - 1);
@@ -430,7 +436,7 @@ fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     let p110 = probe_data_read[get_probe_index(ix1, iy1, iz0)].sh_coeffs;
     let p111 = probe_data_read[get_probe_index(ix1, iy1, iz1)].sh_coeffs;
     
-    // Evaluate SH for each probe
+    // Evaluate SH for each probe color
     let c000 = sh_eval(p000, dir);
     let c001 = sh_eval(p001, dir);
     let c010 = sh_eval(p010, dir);
@@ -451,89 +457,6 @@ fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     
     return mix(c0, c1, fz);
 }
-
-/*
-// Modified fragment_main to use probe-based illumination
-@fragment
-fn fragment_main(in: VertexOutput) -> @location(0) float4 {
-    var ray_dir = normalize(in.ray_dir);
-    let light_dir = params.light_dir.xyz;
-    let light_emission = params.light_dir.w;
-
-    var t_interval = intersect_box(in.transformed_eye, ray_dir);
-    if (t_interval.x > t_interval.y) {
-        discard;
-    }
-    t_interval.x = max(t_interval.x, 0.0);
-
-    let pixel = int2(i32(in.position.x), i32(in.position.y));
-    var rng = get_rng(params.frame_id, pixel, int2(1280, 720));
-
-    var illum = float3(0.0);
-    var throughput = float3(1.0);
-    var transmittance = 1.0;
-    var had_any_event = false;
-    var pos = in.transformed_eye;
-
-    // Sample the next scattering event in the volume
-    for (var i = 0; i < 4; i += 1) {
-        var t = t_interval.x;
-        var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
-
-        if (!event.scattering_event) {
-            // Use probe-based illumination for environment
-            if (had_any_event) {
-                illum += throughput * get_interpolated_radiance(pos, ray_dir);
-            } else {
-                illum = float3(0.1); // Fallback ambient
-            }
-            break;
-        } else {
-            had_any_event = true;
-            pos = pos + ray_dir * t;
-
-            // Sample direct light (optional - can also use probes for this)
-            t_interval = intersect_box(pos, light_dir);
-            t_interval.x = 0.0;
-            var light_transmittance = delta_tracking_transmittance(pos, light_dir, t_interval, &rng);
-            illum += throughput * light_transmittance * float3(light_emission);
-
-            // Use probe-based illumination for indirect light
-            let bounce_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
-            illum += throughput * event.color * get_interpolated_radiance(pos, bounce_dir);
-
-            throughput *= event.color * event.transmittance * params.sigma_s_scale;
-
-            // Scatter in a random direction
-            ray_dir = bounce_dir;
-            t_interval = intersect_box(pos, ray_dir);
-            if (t_interval.x > t_interval.y) {
-                illum = float3(0.0, 1.0, 0.0);
-                break;
-            }
-            t_interval.x = 0.0;
-        }
-    }
-
-    var color = float4(illum, 1.0);
-
-    // Accumulate into the accumulation buffer
-    var accum_color = float4(0.0);
-    if (params.frame_id > 0u) {
-        accum_color = textureLoad(accum_buffer_in, pixel, 0);
-    }
-    accum_color += color;
-    textureStore(accum_buffer_out, pixel, accum_color);
-
-    color = accum_color / f32(params.frame_id + 1u);
-
-    // Convert to sRGB
-    color.r = linear_to_srgb(color.r);
-    color.g = linear_to_srgb(color.g);
-    color.b = linear_to_srgb(color.b);
-    return color;
-}*/
-
 
 @fragment
 fn fragment_main(in: VertexOutput) -> @location(0) float4 {
@@ -635,7 +558,7 @@ fn probe_vertex_main(
     @builtin(vertex_index) vertexIndex: u32
 ) -> VertexOutput {
     var output : VertexOutput;
-    let base_quad_size = 0.08;
+    let base_quad_size = 0.02;
 
     // Triangle for quad (two triangles)
     let points = array<vec2<f32>, 6>(
@@ -648,16 +571,21 @@ fn probe_vertex_main(
     );
 
     let probe_pos = probe_data_read[instanceIndex].position;
-    let probe_const_col = probe_data_read[instanceIndex].sh_coeffs.L00;
+    let probe_sh = probe_data_read[instanceIndex].sh_coeffs;
+    
     let world_center = probe_pos * params.volume_scale.xyz;
+    let probe_col = sh_eval(probe_sh, normalize(world_center - params.eye_pos.xyz));
+    let probe_const_col = probe_data_read[instanceIndex].sh_coeffs.L00;
 
     // Compute view-aligned billboard axes
-    let cam_forward = normalize(params.eye_pos.xyz); // view direction
+    //let cam_forward = normalize(params.eye_pos.xyz); // view direction
+    let cam_forward = normalize(params.eye_pos.xyz - world_center);
+
     let cam_right = normalize(cross(cam_forward, vec3<f32>(0.0, 1.0, 0.0)));
     let cam_up = cross(cam_right, cam_forward);
 
     let distance = length(world_center - params.eye_pos.xyz);
-    let scale_factor = clamp(distance * 0.05, 0.05, 2.0);
+    let scale_factor = clamp(1.0 / (distance + 0.1), 0.002, 0.8);
 
     // Apply screen-facing quad orientation
     let quad_offset = (cam_right * points[vertexIndex].x + cam_up * points[vertexIndex].y)
@@ -680,7 +608,8 @@ fn probe_vertex_main(
         vec3<f32>(0.0, 0.0, 0.0)  // black
     );
     //output.color = colors[z];
-    output.color = probe_const_col;
+    //output.color = probe_const_col;
+    output.color = probe_col;
 
     return output;
 }

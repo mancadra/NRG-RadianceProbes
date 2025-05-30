@@ -4,6 +4,8 @@ import virdis from "./colormaps/matplotlib-virdis.png";
 import rainbow from "./colormaps/rainbow.png";
 import samselGreen from "./colormaps/samsel-linear-green.png";
 import samselYgb from "./colormaps/samsel-linear-ygb-1211g.png";
+import clearAlpha from "./colormaps/clear-alpha.png";
+import white from "./colormaps/white.png";
 
 export const volumes = {
     "Fuel": "fuel_64x64x64_uint8.raw",
@@ -22,6 +24,8 @@ export const colormaps = {
     "Rainbow": rainbow,
     "Samsel Linear Green": samselGreen,
     "Samsel Linear YGB 1211G": samselYgb,
+    "Clear Alpha": clearAlpha,
+    "White": white,
 };
 
 export function getVolumeDimensions(file) {
