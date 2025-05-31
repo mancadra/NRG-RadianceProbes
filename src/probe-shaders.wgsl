@@ -344,48 +344,6 @@ fn trace_radiance(orig: float3, dir: float3, rng: ptr<function, LCGRand>) -> flo
     return illum;
 }
 
-/// Generates a 3D grid of probe positions within the unit cube [0,1]
-/// Computes SH radiance at each probe and writes results to probe_data_write.
-/// Automatically clears the dirty flag after all probes are updated.
-@compute @workgroup_size(8, 8, 1)
-fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let gx = i32(global_id.x);
-    let gy = i32(global_id.y);
-    let gz = i32(global_id.z);
-
-    var activeT = true;
-    if (gx >= params.probe_density || gy >= params.probe_density || gz >= params.probe_density) {
-        activeT = false; // Out of bounds
-    }
-    if (atomicLoad(&probe_dirty) == 0u) {
-        activeT = false; // Probes are already up-to-date
-    }
-
-    let idx = i32(gz * params.probe_density * params.probe_density + gy * params.probe_density + gx);
-    let total_probes = params.probe_density * params.probe_density * params.probe_density;
-
-    if (activeT) {
-        var rng = LCGRand();
-        rng.state = u32(idx); // Deterministic RNG seed per probe
-
-        let step = 1.0 / f32(params.probe_density - 1);
-        let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
-
-        probe_data_write[idx].position = pos;
-        probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
-    }
-
-    // All threads reach the barrier
-    workgroupBarrier();
-    
-    // Only first thread in workgroup handles the flag clearing
-    if (global_id.x == 0u && global_id.y == 0u && global_id.z == 0u) {
-        if (atomicLoad(&probe_dirty) != 0u) {
-            // No need for storageBarrier here - atomicStore has release semantics
-            atomicStore(&probe_dirty, 0u);
-        }
-    }
-}
 
 // Evaluates the SH for a given direction using precomputed coefficients.
 fn sh_eval(sh: SHCoefficients, dir: float3) -> float3 {
@@ -456,6 +414,39 @@ fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     let c1 = mix(c01, c11, fy);
     
     return mix(c0, c1, fz);
+}
+
+/// Generates a 3D grid of probe positions within the unit cube [0,1]
+/// Computes SH radiance at each probe and writes results to probe_data_write.
+/// Automatically clears the dirty flag after all probes are updated.
+@compute @workgroup_size(8, 8, 1)
+fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let gx = i32(global_id.x);
+    let gy = i32(global_id.y);
+    let gz = i32(global_id.z);
+
+    if (gx >= params.probe_density || gy >= params.probe_density || gz >= params.probe_density) {
+        return; // Out of bounds
+    }
+    if (atomicLoad(&probe_dirty) == 0u) {
+        return; // Probes are already up-to-date
+    }
+
+    let idx = i32(gz * params.probe_density * params.probe_density + gy * params.probe_density + gx);
+    let total_probes = params.probe_density * params.probe_density * params.probe_density;
+
+    var rng = LCGRand();
+    rng.state = u32(idx); // Deterministic RNG seed per probe
+
+    let step = 1.0 / f32(params.probe_density - 1);
+    let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
+
+    probe_data_write[idx].position = pos;
+    probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
+    
+    if (all(global_id == vec3<u32>(0))) {
+        atomicStore(&probe_dirty, 0u);
+    }
 }
 
 @fragment
@@ -608,8 +599,8 @@ fn probe_vertex_main(
         vec3<f32>(0.0, 0.0, 0.0)  // black
     );
     //output.color = colors[z];
-    //output.color = probe_const_col;
-    output.color = probe_col;
+    output.color = probe_const_col;
+    //output.color = probe_col;
 
     return output;
 }

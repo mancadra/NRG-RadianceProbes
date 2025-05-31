@@ -304,7 +304,6 @@ export default async function runProbeRenderer() {
         }
     });
 
-
     var camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
     var proj = mat4.perspective(
         mat4.create(), 50 * Math.PI / 180.0, canvas.width / canvas.height, 0.1, 100);
@@ -408,26 +407,32 @@ export default async function runProbeRenderer() {
         // Mark probes as dirty
         device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
         
-        // Dispatch compute shader
-        const commandEncoder = device.createCommandEncoder();
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(computePipeline);
-        computePass.setBindGroup(0, bindGroup);
+        {
+            // Dispatch compute shader
+            const computeEncoder = device.createCommandEncoder();
+            const computePass = computeEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, bindGroup);
 
-        const workgroupSize = 8;
-        const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
-        //computePass.dispatchWorkgroups(1, 1, 8);
-        computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
-        //computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
+            const workgroupSize = 8;
+            const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
+            //computePass.dispatchWorkgroups(1, 1, 8);
+            computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
+            //computePass.dispatchWorkgroups(dispatchCount, dispatchCount, dispatchCount);
+            computePass.end();
+            device.queue.submit([computeEncoder.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
 
-        computePass.end();
-
-        const numProbes = PROBE_DENSITY ** 3;
-        const floatsPerProbe = 3 + (9 * 3); // position + SH coeffs (vec3[9])
-        const bytesPerProbe = floatsPerProbe * 4;
-        commandEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, numProbes * bytesPerProbe);
-        await device.queue.submit([commandEncoder.finish()]);
-        await device.queue.onSubmittedWorkDone();
+        {
+            const copyEncoder = device.createCommandEncoder();
+            const numProbes = PROBE_DENSITY ** 3;
+            const floatsPerProbe = 3 + (9 * 3); // position + SH coeffs (vec3[9])
+            const bytesPerProbe = floatsPerProbe * 4;
+            copyEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, numProbes * bytesPerProbe);
+            await device.queue.submit([copyEncoder.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
 
         const end = performance.now();
         const time = end - start;
@@ -496,9 +501,17 @@ export default async function runProbeRenderer() {
         }
 
         if (PROBE_DENSITY != parseInt(document.getElementById("probeDensity").value) || PROBE_SAMPLES != parseInt(document.getElementById("probeSamples").value)) {
+            frameId = 0;
             PROBE_DENSITY = parseInt(document.getElementById("probeDensity").value);
             PROBE_SAMPLES = parseInt(document.getElementById("probeSamples").value);
             probesNeedUpdate = true;
+        }
+
+        if (probesNeedUpdate) {
+            device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+            device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+            await updateProbes(device, frameId);
+            probesNeedUpdate = false;
         }
 
         {
@@ -525,13 +538,6 @@ export default async function runProbeRenderer() {
             upload.unmap();
         }
 
-        if (probesNeedUpdate == true) {
-            device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
-            device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
-            await updateProbes(device, frameId);
-            probesNeedUpdate = false;
-        }
-
         bindGroupEntries[4].resource = accumBufferViews[frameId % 2];
         bindGroupEntries[5].resource = accumBufferViews[(frameId + 1) % 2];
 
@@ -552,6 +558,7 @@ export default async function runProbeRenderer() {
         }
 
         if (DRAW_PROBES) {
+            console.log(`Rendering ${PROBE_DENSITY}^3 radiance probes for ${volumeName}`);
             renderPass.setPipeline(probePipeline);
             renderPass.setBindGroup(0, bindGroup);
             renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);

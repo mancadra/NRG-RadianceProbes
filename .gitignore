@@ -3,6 +3,7 @@
 *.spv
 shaders/embedded_shaders.js
 models/
+RESULTS/
 *.wasm
 js/liblas.js
 js/liblas_wrapper.js
