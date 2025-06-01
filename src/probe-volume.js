@@ -49,7 +49,7 @@ export default async function runProbeRenderer() {
     //var device = await adapter.requestDevice();
     const device = await adapter.requestDevice({
     requiredLimits: {
-        maxBufferSize: adapterLimits.maxStorageBufferBindingSize  // request max possible
+        maxBufferSize: adapterLimits.maxStorageBufferBindingSize
     }
     });
 
@@ -97,8 +97,7 @@ export default async function runProbeRenderer() {
     new Uint16Array(indexBuffer.getMappedRange()).set(cube.indices);
     indexBuffer.unmap();
 
-    // Create a buffer to store the view parameters, the buffer is padded out by 1 float
-    var viewParamsSize = (16 + 4 * 4 + 6) * 4;
+    var viewParamsSize = (20 + 4 * 4) * 4;
     var viewParamsBuffer = device.createBuffer(
         {size: viewParamsSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
 
@@ -158,10 +157,6 @@ export default async function runProbeRenderer() {
     ];
 
     var accumBufferViews = [accumBuffers[0].createView(), accumBuffers[1].createView()];
-
-    const maxSize = device.limits.maxBufferSize;
-
-    //console.log("Maximum buffer size supported:", maxSize);
 
     //const bufferSize = MAX_PROBE_DENSITY ** 3 * (4 + 9 * 4) * 4; // position + SH coefficients (vec3[9]) + padding
     const bufferSize = MAX_PROBE_DENSITY ** 3 * 160;
@@ -520,10 +515,11 @@ export default async function runProbeRenderer() {
         if (probesNeedUpdate) {
             //device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(bufferSize));
             //device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(bufferSize));
-            frameId = 0;
+            
             await updateProbes(device, frameId);
-            renderCount = 0;
-            sumTime = 0;
+            frameId = 0;
+            //renderCount = 0;
+            //sumTime = 0;
             probesNeedUpdate = false;
         }
 
