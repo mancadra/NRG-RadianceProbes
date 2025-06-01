@@ -45,7 +45,7 @@ export default async function runProbeRenderer() {
         return;
     }
     const adapterLimits = adapter.limits;
-    console.log("Adapter's supported maxBufferSize:", adapterLimits.maxBufferBindingSize);
+    //console.log("Adapter's supported maxBufferSize:", adapterLimits.maxBufferBindingSize);
     //var device = await adapter.requestDevice();
     const device = await adapter.requestDevice({
     requiredLimits: {
@@ -53,7 +53,7 @@ export default async function runProbeRenderer() {
     }
     });
 
-    console.log("Device's actual maxBufferSize:", device.limits.maxBufferBindingSize);
+    //console.log("Device's actual maxBufferSize:", device.limits.maxBufferBindingSize);
 
 
     // Get a context to display our rendered image on the canvas
@@ -161,23 +161,20 @@ export default async function runProbeRenderer() {
 
     const maxSize = device.limits.maxBufferSize;
 
-    console.log("Maximum buffer size supported:", maxSize);
+    //console.log("Maximum buffer size supported:", maxSize);
 
     //const bufferSize = MAX_PROBE_DENSITY ** 3 * (4 + 9 * 4) * 4; // position + SH coefficients (vec3[9]) + padding
-    //const bufferSize = MAX_PROBE_DENSITY ** 3 * 160;
-    const bufferSize = device.limits.maxStorageBufferBindingSize / 4;
+    const bufferSize = MAX_PROBE_DENSITY ** 3 * 160;
 
     var probeBufferWrite = device.createBuffer({
         size:  bufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
-    console.log(bufferSize);
+    //console.log(bufferSize);
 
     var probeBufferRead = device.createBuffer({
         size: bufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
         probeBufferWrite.label = "probeBufferWrite";
-    var probeDirtyBuffer = device.createBuffer({
-        size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
 
     
     /*
@@ -185,7 +182,6 @@ export default async function runProbeRenderer() {
     device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(bufferSize));
     device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(bufferSize));
     */
-    device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
 
     // Setup render outputs
     var swapChainFormat = "bgra8unorm";
@@ -236,16 +232,6 @@ export default async function runProbeRenderer() {
                     type: 'read-only-storage'
                 }
             },
-            {
-                binding: 8,
-                visibility: GPUShaderStage.COMPUTE,
-                buffer: { 
-                    type: 'storage',
-                    hasDynamicOffset: false,
-                    minBindingSize: 0
-                }
-            },
-            
         ]
     });
 
@@ -385,7 +371,6 @@ export default async function runProbeRenderer() {
         {binding: 5, resource: accumBufferViews[1]},
         {binding: 6, resource: { buffer: probeBufferWrite } },
         {binding: 7, resource: { buffer: probeBufferRead } },
-        {binding: 8, resource: { buffer: probeDirtyBuffer } },
     ];
 
     var bindGroup = device.createBindGroup({layout: bindGroupLayout, entries: bindGroupEntries});
@@ -400,6 +385,7 @@ export default async function runProbeRenderer() {
     var sigmaSScale = 1.0;
 
     async function updateProbes(device, frameId) {
+        console.log(`Updating probes for frame ${frameId} (probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES})`);
         const start = performance.now();
         projView = mat4.mul(projView, proj, camera.camera);
 
@@ -427,8 +413,6 @@ export default async function runProbeRenderer() {
 
             upload.unmap();
         }
-        // Mark probes as dirty
-        device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
         
         {
             // Dispatch compute shader
@@ -459,10 +443,14 @@ export default async function runProbeRenderer() {
         console.log(`Probe initialization time(probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES}): \n${time} ms`);
     }
 
-    await updateProbes(device, 0);
+    //await updateProbes(device, 0);
 
     const render = async () => {
         const start = performance.now();
+        const copyEncoder = device.createCommandEncoder();
+        copyEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, bufferSize);
+        await device.queue.submit([copyEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
 
         // Fetch a new volume or colormap if a new one was selected and update the probes
         if (volumeName != volumePicker.value) {
@@ -518,6 +506,8 @@ export default async function runProbeRenderer() {
         let draw_volume_value = document.getElementById("drawVolume").checked ? 1 : 0;
         if (DRAW_VOLUME != draw_volume_value) {
             DRAW_VOLUME = draw_volume_value;
+            probesNeedUpdate = true;
+            frameId = 0;
         }
 
         if (PROBE_DENSITY != parseInt(document.getElementById("probeDensity").value) || PROBE_SAMPLES != parseInt(document.getElementById("probeSamples").value)) {
@@ -530,7 +520,10 @@ export default async function runProbeRenderer() {
         if (probesNeedUpdate) {
             //device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(bufferSize));
             //device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(bufferSize));
+            frameId = 0;
             await updateProbes(device, frameId);
+            renderCount = 0;
+            sumTime = 0;
             probesNeedUpdate = false;
         }
 
@@ -560,6 +553,9 @@ export default async function runProbeRenderer() {
 
         bindGroupEntries[4].resource = accumBufferViews[frameId % 2];
         bindGroupEntries[5].resource = accumBufferViews[(frameId + 1) % 2];
+
+        bindGroupEntries[6].resource = { buffer: probeBufferWrite };
+        bindGroupEntries[7].resource = { buffer: probeBufferRead };
 
         bindGroup = device.createBindGroup({layout: bindGroupLayout, entries: bindGroupEntries});
 

@@ -114,8 +114,6 @@ struct ViewParams {
 @group(0) @binding(6) var<storage, read_write> probe_data_write: array<Probe>;
 @group(0) @binding(7) var<storage, read> probe_data_read: array<Probe>;
 // Used for tracking the dirty state of the probe data (probes in need of an update)
-@group(0) @binding(8) var<storage, read_write> probe_dirty: atomic<u32>;
-
 
 @vertex
 fn vertex_main(vert: VertexInput) -> VertexOutput {
@@ -428,9 +426,6 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (gx >= params.probe_density || gy >= params.probe_density || gz >= params.probe_density) {
         return; // Out of bounds
     }
-    if (atomicLoad(&probe_dirty) == 0u) {
-        return; // Probes are already up-to-date
-    }
 
     let idx = i32(gz * params.probe_density * params.probe_density + gy * params.probe_density + gx);
     let total_probes = params.probe_density * params.probe_density * params.probe_density;
@@ -443,10 +438,6 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     probe_data_write[idx].position = pos;
     probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
-    
-    if (all(global_id == vec3<u32>(0))) {
-        atomicStore(&probe_dirty, 0u);
-    }
 }
 
 @fragment
@@ -608,7 +599,6 @@ fn probe_vertex_main(
 
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    //return vec4<f32>(0.0, 1.0, 0.0, 1.0); // Placeholder for probe color
     return vec4<f32>(input.color, 1.0);
 }
 
