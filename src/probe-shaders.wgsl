@@ -599,8 +599,8 @@ fn probe_vertex_main(
         vec3<f32>(0.0, 0.0, 0.0)  // black
     );
     //output.color = colors[z];
-    output.color = probe_const_col;
-    //output.color = probe_col;
+    //output.color = probe_const_col;
+    output.color = probe_col;
 
     return output;
 }

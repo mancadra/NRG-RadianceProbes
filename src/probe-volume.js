@@ -17,7 +17,7 @@ import {
     volumes
 } from "./volume.js";
 
-let probesNeedUpdate = false;
+let probesNeedUpdate = true;
 let renderCount = 0;
 let sumTime = 0;
 const MAX_PROBE_DENSITY = 64;
@@ -44,7 +44,17 @@ export default async function runProbeRenderer() {
         document.getElementById("no-webgpu").setAttribute("style", "display:block;");
         return;
     }
-    var device = await adapter.requestDevice();
+    const adapterLimits = adapter.limits;
+    console.log("Adapter's supported maxBufferSize:", adapterLimits.maxBufferBindingSize);
+    //var device = await adapter.requestDevice();
+    const device = await adapter.requestDevice({
+    requiredLimits: {
+        maxBufferSize: adapterLimits.maxStorageBufferBindingSize  // request max possible
+    }
+    });
+
+    console.log("Device's actual maxBufferSize:", device.limits.maxBufferBindingSize);
+
 
     // Get a context to display our rendered image on the canvas
     var canvas = document.getElementById("webgpu-canvas");
@@ -149,19 +159,32 @@ export default async function runProbeRenderer() {
 
     var accumBufferViews = [accumBuffers[0].createView(), accumBuffers[1].createView()];
 
-    var probeBufferWrite = device.createBuffer({
-        size: MAX_PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
-    var probeBufferRead = device.createBuffer({
-        size: MAX_PROBE_DENSITY**3 * (3 + 9*3) * 4, // position + 9 SH coefficients (RGB)
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+    const maxSize = device.limits.maxBufferSize;
 
+    console.log("Maximum buffer size supported:", maxSize);
+
+    //const bufferSize = MAX_PROBE_DENSITY ** 3 * (4 + 9 * 4) * 4; // position + SH coefficients (vec3[9]) + padding
+    //const bufferSize = MAX_PROBE_DENSITY ** 3 * 160;
+    const bufferSize = device.limits.maxStorageBufferBindingSize / 4;
+
+    var probeBufferWrite = device.createBuffer({
+        size:  bufferSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+    console.log(bufferSize);
+
+    var probeBufferRead = device.createBuffer({
+        size: bufferSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+        probeBufferWrite.label = "probeBufferWrite";
     var probeDirtyBuffer = device.createBuffer({
         size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
 
+    
+    /*
     // Initialize probes to zero
-    device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
-    device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+    device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(bufferSize));
+    device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(bufferSize));
+    */
     device.queue.writeBuffer(probeDirtyBuffer, 0, new Uint32Array([1]));
 
     // Setup render outputs
@@ -426,10 +449,7 @@ export default async function runProbeRenderer() {
 
         {
             const copyEncoder = device.createCommandEncoder();
-            const numProbes = PROBE_DENSITY ** 3;
-            const floatsPerProbe = 3 + (9 * 3); // position + SH coeffs (vec3[9])
-            const bytesPerProbe = floatsPerProbe * 4;
-            copyEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, numProbes * bytesPerProbe);
+            copyEncoder.copyBufferToBuffer(probeBufferWrite, 0, probeBufferRead, 0, bufferSize);
             await device.queue.submit([copyEncoder.finish()]);
             await device.queue.onSubmittedWorkDone();
         }
@@ -508,8 +528,8 @@ export default async function runProbeRenderer() {
         }
 
         if (probesNeedUpdate) {
-            device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
-            device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(MAX_PROBE_DENSITY**3 * (3 + 9*3)));
+            //device.queue.writeBuffer(probeBufferWrite, 0, new Float32Array(bufferSize));
+            //device.queue.writeBuffer(probeBufferRead, 0, new Float32Array(bufferSize));
             await updateProbes(device, frameId);
             probesNeedUpdate = false;
         }
