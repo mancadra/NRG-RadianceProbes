@@ -306,7 +306,8 @@ fn compute_probe_radiance(probe_pos: float3, rng: ptr<function, LCGRand>) -> SHC
 
 // Traces a ray from `orig` in direction `dir` and returns the radiance (lighting) from that ray. It uses `sample_woodcock` to find a scattering event and then estimates direct lighting.
 fn trace_radiance(orig: float3, dir: float3, rng: ptr<function, LCGRand>) -> float3 {
-    var t_interval = intersect_box(orig, dir);
+    var ray_dir = normalize(dir);
+    var t_interval = intersect_box(orig, ray_dir);
     if (t_interval.x > t_interval.y) {
         return float3(0.0); // No volume intersection
     }
@@ -318,27 +319,43 @@ fn trace_radiance(orig: float3, dir: float3, rng: ptr<function, LCGRand>) -> flo
     
     var illum = float3(0.0);
     var throughput = float3(1.0);
+    var had_any_event = false;
+    for (var i = 0; i < 4; i += 1) {
+        var t = t_interval.x;
+        var event = sample_woodcock(orig, ray_dir, t_interval, &t, rng);
+        if (!event.scattering_event) {
+            if (had_any_event) {
+                illum += throughput * float3(ambient_strength);
+            } else {
+                illum = float3(0.1);
+            }
+            break;
+        } else {
+            had_any_event = true;
+            var pos = orig + ray_dir * t;
 
-    var t = t_interval.x;
-    var event = sample_woodcock(orig, dir, t_interval, &t, rng);
-    if (!event.scattering_event) {
-        illum = float3(0.1);
-    } else {
-        var pos = orig + dir * t;
+            // Sample illumination from the direct light
+            t_interval = intersect_box(pos, light_dir);
+            // We're inside the volume
+            t_interval.x = 0.0;
 
-        // Sample illumination from the direct light
-        t_interval = intersect_box(pos, light_dir);
-        // We're inside the volume
-        t_interval.x = 0.0;
+            var light_transmittance = delta_tracking_transmittance(pos, light_dir, t_interval, rng);
+            illum += throughput * light_transmittance * float3(light_emission);
 
-        var light_transmittance = delta_tracking_transmittance(pos, light_dir, t_interval, rng);
-        illum += throughput * light_transmittance * float3(light_emission);
+            illum += throughput * event.color * volume_emission;
 
-        illum += throughput * event.color * volume_emission;
+            throughput *= event.color * event.transmittance * params.sigma_s_scale;
 
-        throughput *= event.color * event.transmittance * params.sigma_s_scale;
+            ray_dir = sample_spherical_direction(float2(lcg_randomf(rng), lcg_randomf(rng)));
+            t_interval = intersect_box(pos, ray_dir);
+            if (t_interval.x > t_interval.y) {
+                illum = float3(0.0, 1.0, 0.0);
+                break;
+            }
+            // We're now inside the volume
+            t_interval.x = 0.0;
+        }
     }
-
     return illum;
 }
 
@@ -471,7 +488,7 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     var had_any_event = false;
     var pos = in.transformed_eye;
     // Sample the next scattering event in the volume
-    for (var i = 0; i < 4; i += 1) {
+    //for (var i = 0; i < 4; i += 1) {
         var t = t_interval.x;
         var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
 
@@ -482,7 +499,7 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
             } else {
                 illum = float3(0.1);
             }
-            break;
+            //break;
         } else {
             had_any_event = true;
 
@@ -495,10 +512,11 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
             // Include emission from the volume for emission/absorption scivis model
             // Scaling the volume emission by the inverse of the opacity from the transfer function
             // can give some nice effects. Would be cool to provide control of this
-            illum += throughput * event.color * volume_emission;// * (1.0 - event.transmittance);
+            //illum += throughput * event.color * volume_emission;// * (1.0 - event.transmittance);
             
-            throughput *= event.color * event.transmittance * params.sigma_s_scale;
+            //throughput *= event.color * event.transmittance * params.sigma_s_scale;
 
+            /*
             // Scatter in a random direction to continue the ray
             ray_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
             t_interval = intersect_box(pos, ray_dir);
@@ -508,7 +526,8 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
             }
             // We're now inside the volume
             t_interval.x = 0.0;
-        }
+            
+        }*/
     }
 
     var color = float4(illum, 1.0);

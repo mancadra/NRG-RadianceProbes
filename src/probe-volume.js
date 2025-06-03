@@ -570,7 +570,7 @@ export default async function runProbeRenderer() {
         }
 
         if (DRAW_PROBES) {
-            console.log(`Rendering ${PROBE_DENSITY}^3 radiance probes for ${volumeName}`);
+            //console.log(`Rendering ${PROBE_DENSITY}^3 radiance probes for ${volumeName}`);
             renderPass.setPipeline(probePipeline);
             renderPass.setBindGroup(0, bindGroup);
             renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
