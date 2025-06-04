@@ -487,47 +487,25 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
 
     var had_any_event = false;
     var pos = in.transformed_eye;
-    // Sample the next scattering event in the volume
-    //for (var i = 0; i < 4; i += 1) {
-        var t = t_interval.x;
-        var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
+    var t = t_interval.x;
+    var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
 
-        if (!event.scattering_event) {
-            // Illuminate with an "environment light"
-            if (had_any_event) {
-                illum += throughput * float3(ambient_strength);
-            } else {
-                illum = float3(0.1);
-            }
-            //break;
+    if (!event.scattering_event) {
+        // Illuminate with an "environment light"
+        if (had_any_event) {
+            illum += throughput * float3(ambient_strength);
         } else {
-            had_any_event = true;
+            illum = float3(0.1);
+        }
+        //break;
+    } else {
+        had_any_event = true;
 
-            // Update scattered ray position
-            pos = pos + ray_dir * t;
+        // Update scattered ray position
+        pos = pos + ray_dir * t;
 
-            var radiance = get_interpolated_radiance(pos, ray_dir);
-            illum += throughput * radiance;
-            
-            // Include emission from the volume for emission/absorption scivis model
-            // Scaling the volume emission by the inverse of the opacity from the transfer function
-            // can give some nice effects. Would be cool to provide control of this
-            //illum += throughput * event.color * volume_emission;// * (1.0 - event.transmittance);
-            
-            //throughput *= event.color * event.transmittance * params.sigma_s_scale;
-
-            /*
-            // Scatter in a random direction to continue the ray
-            ray_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
-            t_interval = intersect_box(pos, ray_dir);
-            if (t_interval.x > t_interval.y) {
-                illum = float3(0.0, 1.0, 0.0);
-                break;
-            }
-            // We're now inside the volume
-            t_interval.x = 0.0;
-            
-        }*/
+        var radiance = get_interpolated_radiance(pos, ray_dir);
+        illum += throughput * radiance;
     }
 
     var color = float4(illum, 1.0);
