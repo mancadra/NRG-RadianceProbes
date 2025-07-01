@@ -111,9 +111,8 @@ struct ViewParams {
 // Used for accumulatinng frames over time to reduce noise
 @group(0) @binding(4) var accum_buffer_in: texture_2d<f32>;
 @group(0) @binding(5) var accum_buffer_out: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(6) var<storage, read_write> probe_data_write: array<Probe>;
-@group(0) @binding(7) var<storage, read> probe_data_read: array<Probe>;
-// Used for tracking the dirty state of the probe data (probes in need of an update)
+@group(0) @binding(6) var probe_texture_write: texture_storage_3d<rgba32float, write>;
+@group(0) @binding(7) var probe_texture_read: texture_3d<f32>;
 
 @vertex
 fn vertex_main(vert: VertexInput) -> VertexOutput {
@@ -381,6 +380,23 @@ fn clamp_probe_coord(coord: i32) -> i32 {
     return clamp(coord, 0, params.probe_density - 1);
 }
 
+fn load_probe_sh(ix: i32, iy: i32, iz: i32) -> SHCoefficients {
+    let base_z = u32(iz * 9); // Each probe occupies 9 consecutive z-slices
+    
+    var coeffs: SHCoefficients;
+    coeffs.L00 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 0u)), 0).rgb;
+    coeffs.L1m1 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 1u)), 0).rgb;
+    coeffs.L10 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 2u)), 0).rgb;
+    coeffs.L11 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 3u)), 0).rgb;
+    coeffs.L2m2 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 4u)), 0).rgb;
+    coeffs.L2m1 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 5u)), 0).rgb;
+    coeffs.L20 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 6u)), 0).rgb;
+    coeffs.L21 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 7u)), 0).rgb;
+    coeffs.L22 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 8u)), 0).rgb;
+    
+    return coeffs;
+}
+
 // Uses trilinear interpolation of the SH coefficients from the 8 nearest probes to estimate radiance at a position and direction.
 fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     // Calculate normalized position in probe grid space [0, 1] -> [0, density-1]
@@ -399,16 +415,16 @@ fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     let fy = fract(grid_pos.y);
     let fz = fract(grid_pos.z);
     
-    // Get all 8 probes
-    let p000 = probe_data_read[get_probe_index(ix0, iy0, iz0)].sh_coeffs;
-    let p001 = probe_data_read[get_probe_index(ix0, iy0, iz1)].sh_coeffs;
-    let p010 = probe_data_read[get_probe_index(ix0, iy1, iz0)].sh_coeffs;
-    let p011 = probe_data_read[get_probe_index(ix0, iy1, iz1)].sh_coeffs;
-    let p100 = probe_data_read[get_probe_index(ix1, iy0, iz0)].sh_coeffs;
-    let p101 = probe_data_read[get_probe_index(ix1, iy0, iz1)].sh_coeffs;
-    let p110 = probe_data_read[get_probe_index(ix1, iy1, iz0)].sh_coeffs;
-    let p111 = probe_data_read[get_probe_index(ix1, iy1, iz1)].sh_coeffs;
-    
+    // Load SH coefficients for all 8 surrounding probes
+    let p000 = load_probe_sh(ix0, iy0, iz0);
+    let p001 = load_probe_sh(ix0, iy0, iz1);
+    let p010 = load_probe_sh(ix0, iy1, iz0);
+    let p011 = load_probe_sh(ix0, iy1, iz1);
+    let p100 = load_probe_sh(ix1, iy0, iz0);
+    let p101 = load_probe_sh(ix1, iy0, iz1);
+    let p110 = load_probe_sh(ix1, iy1, iz0);
+    let p111 = load_probe_sh(ix1, iy1, iz1);
+
     // Evaluate SH for each probe color
     let c000 = sh_eval(p000, dir);
     let c001 = sh_eval(p001, dir);
@@ -431,6 +447,20 @@ fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
     return mix(c0, c1, fz);
 }
 
+fn storeSHCoefficients(ix: i32, iy: i32, iz: i32, sh: SHCoefficients) {
+    let base_z = u32(iz * 9); 
+
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 0u), vec4<f32>(sh.L00, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 1u), vec4<f32>(sh.L1m1, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 2u), vec4<f32>(sh.L10, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 3u), vec4<f32>(sh.L11, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 4u), vec4<f32>(sh.L2m2, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 5u), vec4<f32>(sh.L2m1, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 6u), vec4<f32>(sh.L20, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 7u), vec4<f32>(sh.L21, 0.0));
+    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 8u), vec4<f32>(sh.L22, 0.0));
+}
+
 /// Generates a 3D grid of probe positions within the unit cube [0,1]
 /// Computes SH radiance at each probe and writes results to probe_data_write.
 /// Automatically clears the dirty flag after all probes are updated.
@@ -444,17 +474,16 @@ fn init_probes(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return; // Out of bounds
     }
 
-    let idx = i32(gz * params.probe_density * params.probe_density + gy * params.probe_density + gx);
-    let total_probes = params.probe_density * params.probe_density * params.probe_density;
-
     var rng = LCGRand();
-    rng.state = u32(idx); // Deterministic RNG seed per probe
+    rng.state = u32(gz * params.probe_density * params.probe_density + 
+                   gy * params.probe_density + 
+                   gx);
 
     let step = 1.0 / f32(params.probe_density - 1);
     let pos = vec3<f32>(f32(gx), f32(gy), f32(gz)) * step;
 
-    probe_data_write[idx].position = pos;
-    probe_data_write[idx].sh_coeffs = compute_probe_radiance(pos, &rng);
+    let sh_coeffs = compute_probe_radiance(pos, &rng);
+    storeSHCoefficients(gx, gy, gz,sh_coeffs);
 }
 
 @fragment
@@ -549,15 +578,21 @@ fn probe_vertex_main(
         vec2<f32>( 1.0,  1.0)  // Top-right
     );
 
-    let probe_pos = probe_data_read[instanceIndex].position;
-    let probe_sh = probe_data_read[instanceIndex].sh_coeffs;
-    
+    let probe_index = i32(instanceIndex);
+    let probe_z = probe_index / (params.probe_density * params.probe_density);
+    let probe_y = (probe_index / params.probe_density) % params.probe_density;
+    let probe_x = probe_index % params.probe_density;
+    let step = 1.0 / f32(params.probe_density - 1);
+    let probe_pos = vec3<f32>(
+        f32(probe_x) * step,
+        f32(probe_y) * step,
+        f32(probe_z) * step
+    );
+    let probe_sh = load_probe_sh(probe_x, probe_y, probe_z);
     let world_center = probe_pos * params.volume_scale.xyz;
     let probe_col = sh_eval(probe_sh, normalize(world_center - params.eye_pos.xyz));
-    let probe_const_col = probe_data_read[instanceIndex].sh_coeffs.L00;
 
-    // Compute view-aligned billboard axes
-    //let cam_forward = normalize(params.eye_pos.xyz); // view direction
+    //let probe_const_col = probe_data_read[instanceIndex].sh_coeffs.L00;
     let cam_forward = normalize(params.eye_pos.xyz - world_center);
 
     let cam_right = normalize(cross(cam_forward, vec3<f32>(0.0, 1.0, 0.0)));
@@ -596,6 +631,9 @@ fn probe_vertex_main(
 
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
+    if (params.probe_density == 32) {
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
     return vec4<f32>(input.color, 1.0);
 }
 
