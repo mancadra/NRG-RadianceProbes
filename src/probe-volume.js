@@ -46,6 +46,7 @@ export default async function runProbeRenderer() {
         return;
     }
     const adapterLimits = adapter.limits;
+    //console.log("Max storage textures per stage:", adapter.limits.maxStorageTexturesPerShaderStage); // 8
     //console.log("Adapter 3D texture limits:", adapter.limits.maxTextureDimension3D);
     //console.log("Adapter array layer limits:", adapter.limits.maxTextureArrayLayers);
 
@@ -54,6 +55,7 @@ export default async function runProbeRenderer() {
         maxBufferSize: adapterLimits.maxStorageBufferBindingSize,
         maxTextureDimension3D: adapterLimits.maxTextureDimension3D,
         maxTextureArrayLayers: adapterLimits.maxTextureArrayLayers,
+        maxStorageTexturesPerShaderStage: adapter.limits.maxStorageTexturesPerShaderStage, // 8
     }
     });
 
@@ -103,10 +105,11 @@ export default async function runProbeRenderer() {
         {size: viewParamsSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
 
     var sampler = device.createSampler({
-        magFilter: "nearest",  // Can't use "linear" with unfilterable-float
-        minFilter: "nearest",
+        magFilter: "linear",
+        minFilter: "linear",
+        mipmapFilter: "linear",
         addressModeU: "clamp-to-edge",
-        addressModeV: "clamp-to-edge", 
+        addressModeV: "clamp-to-edge",
         addressModeW: "clamp-to-edge"
     });
 
@@ -160,21 +163,23 @@ export default async function runProbeRenderer() {
 
     var accumBufferViews = [accumBuffers[0].createView(), accumBuffers[1].createView()];
 
-    var probeTextureWrite = device.createTexture({
-        size: [PROBE_DENSITY, PROBE_DENSITY, PROBE_DENSITY * SH_FLOATS_PER_PROBE],
-        dimension: "3d",
-        format: "rgba32float",
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-    });
+    
+    function createSHTextures(device, density) {
+        return Array.from({ length: 9 }, () =>
+            device.createTexture({
+                size: [density, density, density],
+                format: "rgba32float",
+                usage: GPUTextureUsage.TEXTURE_BINDING |
+                    GPUTextureUsage.STORAGE_BINDING |
+                    GPUTextureUsage.COPY_SRC |
+                    GPUTextureUsage.COPY_DST,
+                dimension: "3d"
+            })
+        );
+    }
 
-    var probeTextureRead = device.createTexture({
-        size: [PROBE_DENSITY, PROBE_DENSITY, PROBE_DENSITY * SH_FLOATS_PER_PROBE],
-        dimension: "3d",
-        format: "rgba32float",
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-        sampleCount: 1,
-        mipLevelCount: 1
-    });
+    let probeTexturesWrite = createSHTextures(device, PROBE_DENSITY);
+    let probeTexturesRead = createSHTextures(device, PROBE_DENSITY);
 
     // Setup render outputs
     var swapChainFormat = "bgra8unorm";
@@ -185,7 +190,7 @@ export default async function runProbeRenderer() {
         alphaMode: "premultiplied"
     });
 
-    var bindGroupLayout = device.createBindGroupLayout({
+    var bindGroupLayout0 = device.createBindGroupLayout({
         entries: [
             {
                 binding: 0,
@@ -209,31 +214,48 @@ export default async function runProbeRenderer() {
                     format: "rgba32float"
                 }
             },
-            {
-                binding: 6,
+            ...Array.from({ length: 4 }, (_, i) => ({
+                binding: 6 + i,
+                visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+                texture: { viewDimension: "3d", sampleType: "float" }
+            })),
+            ...Array.from({ length: 4 }, (_, i) => ({
+                binding: 10 + i,
                 visibility: GPUShaderStage.COMPUTE,
                 storageTexture: {
                     access: "write-only",
                     format: "rgba32float",
                     viewDimension: "3d"
                 }
-            },
-            {
-                binding: 7,
-                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-                texture: {
-                    sampleType: "unfilterable-float",
+            }))
+        ]
+    });
+    
+    // Two bindGroupLayouts since we need to bind 9 textures for the probes and the maximum is 8
+    var bindGroupLayout1 = device.createBindGroupLayout({
+        entries: [
+            ...Array.from({ length: 5 }, (_, i) => ({
+                binding: 0 + i,
+                visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+                texture: { viewDimension: "3d", sampleType: "float" }
+            })),
+            ...Array.from({ length: 5 }, (_, i) => ({
+                binding: 5 + i,
+                visibility: GPUShaderStage.COMPUTE,
+                storageTexture: {
+                    access: "write-only",
+                    format: "rgba32float",
                     viewDimension: "3d"
                 }
-            }
+            }))
         ]
     });
 
     // Create render pipeline
-    var layout = device.createPipelineLayout({bindGroupLayouts: [bindGroupLayout]});
+    var layout = device.createPipelineLayout({bindGroupLayouts: [bindGroupLayout0, bindGroupLayout1]});
     var computePipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({
-            bindGroupLayouts: [bindGroupLayout]
+            bindGroupLayouts: [bindGroupLayout0, bindGroupLayout1]
         }),
         compute: {
             module: shaderModule,
@@ -355,7 +377,7 @@ export default async function runProbeRenderer() {
     var lightThetaValue = lightThetaSlider.value;
     var lightStrengthValue = lightStrengthSlider.value;
 
-    var bindGroupEntries = [
+    var bindGroupEntries0 = [
         {binding: 0, resource: {buffer: viewParamsBuffer}},
         {binding: 1, resource: volumeTexture.createView()},
         {binding: 2, resource: colormapTexture.createView()},
@@ -363,11 +385,35 @@ export default async function runProbeRenderer() {
         // Updated each frame because we need to ping pong the accumulation buffers
         {binding: 4, resource: accumBufferViews[0]},
         {binding: 5, resource: accumBufferViews[1]},
-        {binding: 6, dimension: "3d", resource: probeTextureWrite.createView()},
-        {binding: 7, dimension: "3d", resource: probeTextureRead.createView()}
+        // First 4 SH read textures
+        ...probeTexturesRead.slice(0, 4).map((tex, i) => ({
+            binding: 6 + i,
+            resource: tex.createView()
+        })),
+        
+        // First 4 SH write textures
+        ...probeTexturesWrite.slice(0, 4).map((tex, i) => ({
+            binding: 10 + i,
+            resource: tex.createView()
+        }))
     ];
 
-    var bindGroup = device.createBindGroup({layout: bindGroupLayout, entries: bindGroupEntries});
+    var bindGroupEntries1 = [
+        // Remaining 5 SH read textures
+        ...probeTexturesRead.slice(4, 9).map((tex, i) => ({
+            binding: 0 + i,
+            resource: tex.createView()
+        })),
+        
+        // Remaining 5 SH write textures
+        ...probeTexturesWrite.slice(4, 9).map((tex, i) => ({
+            binding: 5 + i,
+            resource: tex.createView()
+        }))
+    ];
+
+    var bindGroup0 = device.createBindGroup({layout: bindGroupLayout0, entries: bindGroupEntries0});
+    var bindGroup1 = device.createBindGroup({layout: bindGroupLayout1, entries: bindGroupEntries1});
 
     var upload = device.createBuffer({
         size: viewParamsSize,
@@ -424,10 +470,10 @@ export default async function runProbeRenderer() {
             const computeEncoder = device.createCommandEncoder();
             const computePass = computeEncoder.beginComputePass();
             computePass.setPipeline(computePipeline);
-            computePass.setBindGroup(0, bindGroup);
+            computePass.setBindGroup(0, bindGroup0);
+            computePass.setBindGroup(1, bindGroup1);
 
             const workgroupSize = 8;
-            const dispatchCount = Math.ceil(PROBE_DENSITY / workgroupSize);
             computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
             computePass.end();
             device.queue.submit([computeEncoder.finish()]);
@@ -435,15 +481,13 @@ export default async function runProbeRenderer() {
 
         {
             const copyEncoder = device.createCommandEncoder();
-            copyEncoder.copyTextureToTexture(
-                { texture: probeTextureWrite },
-                { texture: probeTextureRead },
-                {
-                    width: PROBE_DENSITY,
-                    height: PROBE_DENSITY,
-                    depthOrArrayLayers: PROBE_DENSITY * SH_FLOATS_PER_PROBE
-                }
-            );
+            for (let i = 0; i < 9; i++) {
+                copyEncoder.copyTextureToTexture(
+                    { texture: probeTexturesWrite[i] },
+                    { texture: probeTexturesRead[i] },
+                    { width: PROBE_DENSITY, height: PROBE_DENSITY, depthOrArrayLayers: PROBE_DENSITY }
+                );
+            }
             device.queue.submit([copyEncoder.finish()]);
         }
 
@@ -451,15 +495,33 @@ export default async function runProbeRenderer() {
         console.log(`Probe initialization time(probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES}): \n${end - start} ms`);
     }
 
-    const updateBindGroup = () => {
-        bindGroupEntries[1].resource = volumeTexture.createView();
-        bindGroupEntries[2].resource = colormapTexture.createView();
-        bindGroupEntries[3].resource = sampler;
-        bindGroupEntries[4].resource = accumBufferViews[frameId % 2];
-        bindGroupEntries[5].resource = accumBufferViews[(frameId + 1) % 2];
-        bindGroupEntries[6].resource = probeTextureWrite.createView();
-        bindGroupEntries[7].resource = probeTextureRead.createView();
-        bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: bindGroupEntries });
+    const updateBindGroups = () => {
+        bindGroupEntries0[1].resource = volumeTexture.createView();
+        bindGroupEntries0[2].resource = colormapTexture.createView();
+        bindGroupEntries0[3].resource = sampler;
+        // accumBufferViews are 2D textures, set bindings 4 and 5
+        bindGroupEntries0[4].resource = accumBufferViews[0];
+        bindGroupEntries0[5].resource = accumBufferViews[1];
+        
+        for (let i = 0; i < probeTexturesRead.length; i++) {
+            bindGroupEntries0[6 + i].resource = probeTexturesRead[i].createView();
+        }
+
+        for (let i = 0; i < probeTexturesWrite.length; i++) {
+            bindGroupEntries0[10 + i].resource = probeTexturesWrite[i].createView();
+        }
+
+        bindGroup0 = device.createBindGroup({ layout: bindGroupLayout0, entries: bindGroupEntries0 });
+
+        for (let i = 0; i < probeTexturesRead.length; i++) {
+            bindGroupEntries1[0 + i].resource = probeTexturesRead[i].createView();
+        }
+
+        for (let i = 0; i < probeTexturesWrite.length; i++) {
+            bindGroupEntries1[5 + i].resource = probeTexturesWrite[i].createView();
+        }
+
+        bindGroup1 = device.createBindGroup({ layout: bindGroupLayout1, entries: bindGroupEntries1 });
     };
 
     const reloadVolumeIfNeeded = async () => {
@@ -476,7 +538,7 @@ export default async function runProbeRenderer() {
 
             frameId = 0;
             probesNeedUpdate = true;
-            updateBindGroup();
+            updateBindGroups();
         }
     };
 
@@ -487,7 +549,7 @@ export default async function runProbeRenderer() {
 
             frameId = 0;
             probesNeedUpdate = true;
-            updateBindGroup();
+            updateBindGroups();
         }
     };
     
@@ -560,7 +622,7 @@ export default async function runProbeRenderer() {
             upload.unmap();
         }
 
-        updateBindGroup();
+        updateBindGroups();
 
         var commandEncoder = device.createCommandEncoder();
         commandEncoder.copyBufferToBuffer(upload, 0, viewParamsBuffer, 0, viewParamsSize);
@@ -570,7 +632,8 @@ export default async function runProbeRenderer() {
 
         if (DRAW_VOLUME) {
             renderPass.setPipeline(renderPipeline);
-            renderPass.setBindGroup(0, bindGroup);
+            renderPass.setBindGroup(0, bindGroup0);
+            renderPass.setBindGroup(1, bindGroup1);
             renderPass.setVertexBuffer(0, vertexBuffer);
             renderPass.setIndexBuffer(indexBuffer, "uint16");
             renderPass.draw(cube.vertices.length / 3, 1, 0, 0);
@@ -578,7 +641,8 @@ export default async function runProbeRenderer() {
 
         if (DRAW_PROBES) {
             renderPass.setPipeline(probePipeline);
-            renderPass.setBindGroup(0, bindGroup);
+            renderPass.setBindGroup(0, bindGroup0);
+            renderPass.setBindGroup(1, bindGroup1);
             renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
         }
         
