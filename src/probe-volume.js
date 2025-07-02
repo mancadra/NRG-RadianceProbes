@@ -390,7 +390,7 @@ export default async function runProbeRenderer() {
     }
 
     async function updateProbes(device, frameId) {
-        //console.log(`Updating probes for frame ${frameId} (probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES})`);
+        await device.queue.onSubmittedWorkDone();
         const start = performance.now();
         projView = mat4.mul(projView, proj, camera.camera);
 
@@ -431,7 +431,6 @@ export default async function runProbeRenderer() {
             computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
             computePass.end();
             device.queue.submit([computeEncoder.finish()]);
-            await device.queue.onSubmittedWorkDone();
         }
 
         {
@@ -446,7 +445,6 @@ export default async function runProbeRenderer() {
                 }
             );
             device.queue.submit([copyEncoder.finish()]);
-            await device.queue.onSubmittedWorkDone();
         }
 
         const end = performance.now();
@@ -495,14 +493,6 @@ export default async function runProbeRenderer() {
     
     const render = async () => {
         var start = performance.now();
-        const copyEncoder = device.createCommandEncoder();
-        copyEncoder.copyTextureToTexture(
-            { texture: probeTextureWrite },
-            { texture: probeTextureRead },
-            { width: PROBE_DENSITY, height: PROBE_DENSITY, depthOrArrayLayers: PROBE_DENSITY * SH_FLOATS_PER_PROBE }
-        );
-        await device.queue.submit([copyEncoder.finish()]);
-        await device.queue.onSubmittedWorkDone();
 
         await reloadVolumeIfNeeded();
         await reloadColormapIfNeeded();
