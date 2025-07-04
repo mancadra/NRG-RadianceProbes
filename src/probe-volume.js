@@ -110,6 +110,7 @@ export default async function runProbeRenderer() {
         mipmapFilter: "nearest",
         addressModeU: "clamp-to-edge",
         addressModeV: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
         addressModeW: "clamp-to-edge"
     });
 
@@ -190,7 +191,7 @@ export default async function runProbeRenderer() {
         alphaMode: "premultiplied"
     });
 
-    var bindGroupLayout = device.createBindGroupLayout({
+    var bindGroupLayout0 = device.createBindGroupLayout({
         entries: [
             {
                 binding: 0,
@@ -232,10 +233,10 @@ export default async function runProbeRenderer() {
     });
 
     // Create render pipeline
-    var layout = device.createPipelineLayout({bindGroupLayouts: [bindGroupLayout]});
+    var layout = device.createPipelineLayout({bindGroupLayouts: [bindGroupLayout0, bindGroupLayout1]});
     var computePipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({
-            bindGroupLayouts: [bindGroupLayout]
+            bindGroupLayouts: [bindGroupLayout0, bindGroupLayout1]
         }),
         compute: {
             module: shaderModule,
@@ -357,7 +358,7 @@ export default async function runProbeRenderer() {
     var lightThetaValue = lightThetaSlider.value;
     var lightStrengthValue = lightStrengthSlider.value;
 
-    var bindGroupEntries = [
+    var bindGroupEntries0 = [
         {binding: 0, resource: {buffer: viewParamsBuffer}},
         {binding: 1, resource: volumeTexture.createView()},
         {binding: 2, resource: colormapTexture.createView()},
@@ -377,7 +378,8 @@ export default async function runProbeRenderer() {
         }))
     ];
 
-    var bindGroup = device.createBindGroup({layout: bindGroupLayout, entries: bindGroupEntries});
+    var bindGroup0 = device.createBindGroup({layout: bindGroupLayout0, entries: bindGroupEntries0});
+    var bindGroup1 = device.createBindGroup({layout: bindGroupLayout1, entries: bindGroupEntries1});
 
     var upload = device.createBuffer({
         size: viewParamsSize,
@@ -434,7 +436,8 @@ export default async function runProbeRenderer() {
             const computeEncoder = device.createCommandEncoder();
             const computePass = computeEncoder.beginComputePass();
             computePass.setPipeline(computePipeline);
-            computePass.setBindGroup(0, bindGroup);
+            computePass.setBindGroup(0, bindGroup0);
+            computePass.setBindGroup(1, bindGroup1);
 
             const workgroupSize = 8;
             computePass.dispatchWorkgroups(Math.ceil(PROBE_DENSITY / workgroupSize), Math.ceil(PROBE_DENSITY / workgroupSize), PROBE_DENSITY);
@@ -491,7 +494,7 @@ export default async function runProbeRenderer() {
 
             frameId = 0;
             probesNeedUpdate = true;
-            updateBindGroup();
+            updateBindGroups();
         }
     };
 
@@ -502,7 +505,7 @@ export default async function runProbeRenderer() {
 
             frameId = 0;
             probesNeedUpdate = true;
-            updateBindGroup();
+            updateBindGroups();
         }
     };
     
@@ -575,7 +578,7 @@ export default async function runProbeRenderer() {
             upload.unmap();
         }
 
-        updateBindGroup();
+        updateBindGroups();
 
         var commandEncoder = device.createCommandEncoder();
         commandEncoder.copyBufferToBuffer(upload, 0, viewParamsBuffer, 0, viewParamsSize);
@@ -585,7 +588,8 @@ export default async function runProbeRenderer() {
 
         if (DRAW_VOLUME) {
             renderPass.setPipeline(renderPipeline);
-            renderPass.setBindGroup(0, bindGroup);
+            renderPass.setBindGroup(0, bindGroup0);
+            renderPass.setBindGroup(1, bindGroup1);
             renderPass.setVertexBuffer(0, vertexBuffer);
             renderPass.setIndexBuffer(indexBuffer, "uint16");
             renderPass.draw(cube.vertices.length / 3, 1, 0, 0);
@@ -593,7 +597,8 @@ export default async function runProbeRenderer() {
 
         if (DRAW_PROBES) {
             renderPass.setPipeline(probePipeline);
-            renderPass.setBindGroup(0, bindGroup);
+            renderPass.setBindGroup(0, bindGroup0);
+            renderPass.setBindGroup(1, bindGroup1);
             renderPass.draw(6, PROBE_DENSITY ** 3, 0, 0);
         }
         

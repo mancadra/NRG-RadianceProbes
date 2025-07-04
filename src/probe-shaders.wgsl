@@ -90,6 +90,8 @@ struct VertexOutput {
     @location(2) color: vec3<f32>,
     @location(3) world_center: vec3<f32>,
     @location(4) probe_position: vec3<f32>,
+    @location(3) world_center: vec3<f32>,
+    @location(4) probe_position: vec3<f32>,
 };
 
 struct ViewParams {
@@ -374,6 +376,7 @@ fn clamp_probe_coord(coord: i32) -> i32 {
 }
 
 fn load_probe_sh(pos: vec3<f32>) -> SHCoefficients {
+fn load_probe_sh(pos: vec3<f32>) -> SHCoefficients {
     var coeffs: SHCoefficients;
     coeffs.L00 = textureSample(sh0Tex, tex_sampler, pos).rgb;
     coeffs.L1m1 = textureSample(sh1Tex, tex_sampler, pos).rgb;
@@ -454,6 +457,10 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
         pos = pos + ray_dir * t;
         var sh_coeffs = load_probe_sh(pos);
 
+            // Update scattered ray position
+        pos = pos + ray_dir * t;
+        var sh_coeffs = load_probe_sh(pos);
+
     if (!event.scattering_event) {
         // Illuminate with an "environment light"
         if (had_any_event) {
@@ -467,6 +474,10 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
 
 
 
+
+        //var radiance = sh_eval(sh_coeffs, normalize(pos - params.eye_pos.xyz));
+        var radiance = sh_eval(sh_coeffs, ray_dir);
+        //var radiance = get_interpolated_radiance(pos, ray_dir);
         //var radiance = sh_eval(sh_coeffs, normalize(pos - params.eye_pos.xyz));
         var radiance = sh_eval(sh_coeffs, ray_dir);
         //var radiance = get_interpolated_radiance(pos, ray_dir);
@@ -529,6 +540,11 @@ fn probe_vertex_main(
     let pos = vec3<f32>(f32(probe_x), f32(probe_y), f32(probe_z));
     output.probe_position = pos;
     //let probe_sh = load_probe_sh(pos);
+
+
+    let pos = vec3<f32>(f32(probe_x), f32(probe_y), f32(probe_z));
+    output.probe_position = pos;
+    //let probe_sh = load_probe_sh(pos);
     let world_center = probe_pos * params.volume_scale.xyz;
     output.world_center = world_center;
 
@@ -557,6 +573,11 @@ fn probe_vertex_main(
 
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
+    let texCoord = (input.probe_position + vec3<f32>(0.5)) / f32(params.probe_density);
+    let probe_sh = load_probe_sh(texCoord); // ← use textureSample() here
+    let view_dir = normalize(input.world_center - params.eye_pos.xyz);
+    let color = sh_eval(probe_sh, view_dir);
+    return vec4<f32>(color, 1.0);
     let texCoord = (input.probe_position + vec3<f32>(0.5)) / f32(params.probe_density);
     let probe_sh = load_probe_sh(texCoord); // ← use textureSample() here
     let view_dir = normalize(input.world_center - params.eye_pos.xyz);
