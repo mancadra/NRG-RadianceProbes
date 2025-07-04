@@ -21,7 +21,7 @@ let probesNeedUpdate = true;
 let renderCount = 0;
 let sumTime = 0;
 const MAX_PROBE_DENSITY = 64;
-const SH_FLOATS_PER_PROBE = 4; // 9 coefficients for spherical harmonics
+const SH_FLOATS_PER_PROBE = 9; // 9 coefficients for spherical harmonics
 
 export default async function runProbeRenderer() {
     let DRAW_PROBES = document.getElementById("drawProbes").checked ? 1 : 0;
@@ -105,9 +105,9 @@ export default async function runProbeRenderer() {
         {size: viewParamsSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
 
     var sampler = device.createSampler({
-        magFilter: "nearest",
-        minFilter: "nearest",
-        mipmapFilter: "nearest",
+        magFilter: "linear",
+        minFilter: "linear",
+        mipmapFilter: "linear",
         addressModeU: "clamp-to-edge",
         addressModeV: "clamp-to-edge",
         addressModeW: "clamp-to-edge"
@@ -165,7 +165,7 @@ export default async function runProbeRenderer() {
 
     
     function createSHTextures(device, density) {
-        return Array.from({ length: SH_FLOATS_PER_PROBE }, () =>
+        return Array.from({ length: 9 }, () =>
             device.createTexture({
                 size: [density, density, density],
                 format: "rgba32float",
@@ -199,7 +199,7 @@ export default async function runProbeRenderer() {
             },
             {binding: 1, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: {viewDimension: "3d"}},
             {binding: 2, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: {viewDimension: "2d"}},
-            {binding: 3, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, sampler: {type: "non-filtering"}},
+            {binding: 3, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, sampler: {type: "filtering"}},
             {
                 binding: 4,
                 visibility: GPUShaderStage.FRAGMENT,
@@ -214,13 +214,13 @@ export default async function runProbeRenderer() {
                     format: "rgba32float"
                 }
             },
-            ...Array.from({ length: SH_FLOATS_PER_PROBE }, (_, i) => ({
+            ...Array.from({ length: 9 }, (_, i) => ({
                 binding: 6 + i,
                 visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
-                texture: { viewDimension: "3d", sampleType: "unfilterable-float" }
+                texture: { viewDimension: "3d", sampleType: "float" }
             })),
-            ...Array.from({ length: SH_FLOATS_PER_PROBE }, (_, i) => ({
-                binding: 6 + SH_FLOATS_PER_PROBE + i,
+            ...Array.from({ length: 9 }, (_, i) => ({
+                binding: 15 + i,
                 visibility: GPUShaderStage.COMPUTE,
                 storageTexture: {
                     access: "write-only",
@@ -365,14 +365,15 @@ export default async function runProbeRenderer() {
         // Updated each frame because we need to ping pong the accumulation buffers
         {binding: 4, resource: accumBufferViews[0]},
         {binding: 5, resource: accumBufferViews[1]},
-
+        // First 4 SH read textures
         ...probeTexturesRead.map((tex, i) => ({
             binding: 6 + i,
             resource: tex.createView()
         })),
         
+        // First 4 SH write textures
         ...probeTexturesWrite.map((tex, i) => ({
-            binding: 6 + SH_FLOATS_PER_PROBE + i,
+            binding: 15 + i,
             resource: tex.createView()
         }))
     ];
@@ -444,7 +445,7 @@ export default async function runProbeRenderer() {
 
         {
             const copyEncoder = device.createCommandEncoder();
-            for (let i = 0; i < SH_FLOATS_PER_PROBE; i++) {
+            for (let i = 0; i < 9; i++) {
                 copyEncoder.copyTextureToTexture(
                     { texture: probeTexturesWrite[i] },
                     { texture: probeTexturesRead[i] },
@@ -458,7 +459,7 @@ export default async function runProbeRenderer() {
         console.log(`Probe initialization time(probe density = ${PROBE_DENSITY}, probe samples = ${PROBE_SAMPLES}): \n${end - start} ms`);
     }
 
-    const updateBindGroup = () => {
+    const updateBindGroups = () => {
         bindGroupEntries[1].resource = volumeTexture.createView();
         bindGroupEntries[2].resource = colormapTexture.createView();
         bindGroupEntries[3].resource = sampler;
@@ -471,7 +472,7 @@ export default async function runProbeRenderer() {
         }
 
         for (let i = 0; i < probeTexturesWrite.length; i++) {
-            bindGroupEntries[6 + SH_FLOATS_PER_PROBE + i].resource = probeTexturesWrite[i].createView();
+            bindGroupEntries[15 + i].resource = probeTexturesWrite[i].createView();
         }
 
         bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: bindGroupEntries });
@@ -491,7 +492,7 @@ export default async function runProbeRenderer() {
 
             frameId = 0;
             probesNeedUpdate = true;
-            updateBindGroup();
+            updateBindGroups();
         }
     };
 
@@ -502,7 +503,7 @@ export default async function runProbeRenderer() {
 
             frameId = 0;
             probesNeedUpdate = true;
-            updateBindGroup();
+            updateBindGroups();
         }
     };
     
@@ -575,7 +576,7 @@ export default async function runProbeRenderer() {
             upload.unmap();
         }
 
-        updateBindGroup();
+        updateBindGroups();
 
         var commandEncoder = device.createCommandEncoder();
         commandEncoder.copyBufferToBuffer(upload, 0, viewParamsBuffer, 0, viewParamsSize);
