@@ -18,7 +18,6 @@ struct LCGRand {
 struct SHCoefficients {
     L00: float3,
     L1m1: float3, L10: float3, L11: float3,
-    L2m2: float3, L2m1: float3, L20: float3, L21: float3, L22: float3,
 };
 
 struct Probe {
@@ -89,6 +88,8 @@ struct VertexOutput {
     @location(0) transformed_eye: float3,
     @location(1) ray_dir: float3,
     @location(2) color: vec3<f32>,
+    @location(3) world_center: vec3<f32>,
+    @location(4) probe_position: vec3<f32>,
 };
 
 struct ViewParams {
@@ -111,8 +112,16 @@ struct ViewParams {
 // Used for accumulatinng frames over time to reduce noise
 @group(0) @binding(4) var accum_buffer_in: texture_2d<f32>;
 @group(0) @binding(5) var accum_buffer_out: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(6) var probe_texture_write: texture_storage_3d<rgba32float, write>;
-@group(0) @binding(7) var probe_texture_read: texture_3d<f32>;
+
+@group(0) @binding(6) var sh0Tex : texture_3d<f32>;
+@group(0) @binding(7) var sh1Tex : texture_3d<f32>;
+@group(0) @binding(8) var sh2Tex : texture_3d<f32>;
+@group(0) @binding(9) var sh3Tex : texture_3d<f32>;
+
+@group(0) @binding(10) var sh0Write : texture_storage_3d<rgba32float, write>;
+@group(0) @binding(11) var sh1Write : texture_storage_3d<rgba32float, write>;
+@group(0) @binding(12) var sh2Write : texture_storage_3d<rgba32float, write>;
+@group(0) @binding(13) var sh3Write : texture_storage_3d<rgba32float, write>;
 
 @vertex
 fn vertex_main(vert: VertexInput) -> VertexOutput {
@@ -259,13 +268,6 @@ fn sh_eval_basis(dir: float3) -> SHCoefficients {
     basis.L10  = float3(0.488603 * z); // sqrt(3/(4π)) * z
     basis.L11  = float3(0.488603 * x); // sqrt(3/(4π)) * x
 
-    // L2m2, L2m1, L20, L21, L22 (quadratic terms)
-    basis.L2m2 = float3(1.092548 * x * y); // 0.5 * sqrt(15/π) * x*y
-    basis.L2m1 = float3(1.092548 * y * z); // 0.5 * sqrt(15/π) * y*z
-    basis.L20  = float3(0.315392 * (3.0 * z * z - 1.0)); // 0.25 * sqrt(5/π) * (3z²-1)
-    basis.L21  = float3(1.092548 * x * z); // 0.5 * sqrt(15/π) * x*z
-    basis.L22  = float3(0.546274 * (x * x - y * y)); // 0.25 * sqrt(15/π) * (x²-y²)
-
     return basis;
 }
 
@@ -276,8 +278,6 @@ fn compute_probe_radiance(probe_pos: float3, rng: ptr<function, LCGRand>) -> SHC
     // Initialize SH coefficients to zero
     sh_coeffs.L00 = float3(0.0);
     sh_coeffs.L1m1 = float3(0.0); sh_coeffs.L10 = float3(0.0); sh_coeffs.L11 = float3(0.0);
-    sh_coeffs.L2m2 = float3(0.0); sh_coeffs.L2m1 = float3(0.0); sh_coeffs.L20 = float3(0.0); 
-    sh_coeffs.L21 = float3(0.0); sh_coeffs.L22 = float3(0.0);
 
     // Sample radiance from random directions
     for (var i: i32 = 0; i < params.probe_samples; i += 1) {
@@ -293,11 +293,6 @@ fn compute_probe_radiance(probe_pos: float3, rng: ptr<function, LCGRand>) -> SHC
         sh_coeffs.L1m1 += radiance * basis.L1m1 * weight;
         sh_coeffs.L10 += radiance * basis.L10 * weight;
         sh_coeffs.L11 += radiance * basis.L11 * weight;
-        sh_coeffs.L2m2 += radiance * basis.L2m2 * weight;
-        sh_coeffs.L2m1 += radiance * basis.L2m1 * weight;
-        sh_coeffs.L20 += radiance * basis.L20 * weight;
-        sh_coeffs.L21 += radiance * basis.L21 * weight;
-        sh_coeffs.L22 += radiance * basis.L22 * weight;
     }
 
     return sh_coeffs;
@@ -363,9 +358,7 @@ fn trace_radiance(orig: float3, dir: float3, rng: ptr<function, LCGRand>) -> flo
 fn sh_eval(sh: SHCoefficients, dir: float3) -> float3 {
     let basis = sh_eval_basis(dir);
     return sh.L00 * basis.L00 +
-           sh.L1m1 * basis.L1m1 + sh.L10 * basis.L10 + sh.L11 * basis.L11 +
-           sh.L2m2 * basis.L2m2 + sh.L2m1 * basis.L2m1 + sh.L20 * basis.L20 +
-           sh.L21 * basis.L21 + sh.L22 * basis.L22;
+           sh.L1m1 * basis.L1m1 + sh.L10 * basis.L10 + sh.L11 * basis.L11;
 }
 
 // Helper function to get probe index from grid coordinates
@@ -380,85 +373,23 @@ fn clamp_probe_coord(coord: i32) -> i32 {
     return clamp(coord, 0, params.probe_density - 1);
 }
 
-fn load_probe_sh(ix: i32, iy: i32, iz: i32) -> SHCoefficients {
-    let base_z = u32(iz * 9); // Each probe occupies 9 consecutive z-slices
-    
+fn load_probe_sh(pos: vec3<f32>) -> SHCoefficients {
     var coeffs: SHCoefficients;
-    coeffs.L00 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 0u)), 0).rgb;
-    coeffs.L1m1 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 1u)), 0).rgb;
-    coeffs.L10 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 2u)), 0).rgb;
-    coeffs.L11 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 3u)), 0).rgb;
-    coeffs.L2m2 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 4u)), 0).rgb;
-    coeffs.L2m1 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 5u)), 0).rgb;
-    coeffs.L20 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 6u)), 0).rgb;
-    coeffs.L21 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 7u)), 0).rgb;
-    coeffs.L22 = textureLoad(probe_texture_read, vec3<u32>(u32(ix), u32(iy), u32(base_z + 8u)), 0).rgb;
+    coeffs.L00 = textureSample(sh0Tex, tex_sampler, pos).rgb;
+    coeffs.L1m1 = textureSample(sh1Tex, tex_sampler, pos).rgb;
+    coeffs.L10 = textureSample(sh2Tex, tex_sampler, pos).rgb;
+    coeffs.L11 = textureSample(sh3Tex, tex_sampler, pos).rgb;
     
     return coeffs;
-}
-
-// Uses trilinear interpolation of the SH coefficients from the 8 nearest probes to estimate radiance at a position and direction.
-fn get_interpolated_radiance(pos: float3, dir: float3) -> float3 {
-    // Calculate normalized position in probe grid space [0, 1] -> [0, density-1]
-    let grid_pos = pos * f32(params.probe_density - 1);
-    
-    // Get the 8 surrounding probes
-    let ix0 = i32(floor(grid_pos.x));
-    let iy0 = i32(floor(grid_pos.y));
-    let iz0 = i32(floor(grid_pos.z));
-    let ix1 = clamp_probe_coord(ix0 + 1);
-    let iy1 = clamp_probe_coord(iy0 + 1);
-    let iz1 = clamp_probe_coord(iz0 + 1);
-    
-    // Get interpolation weights
-    let fx = fract(grid_pos.x);
-    let fy = fract(grid_pos.y);
-    let fz = fract(grid_pos.z);
-    
-    // Load SH coefficients for all 8 surrounding probes
-    let p000 = load_probe_sh(ix0, iy0, iz0);
-    let p001 = load_probe_sh(ix0, iy0, iz1);
-    let p010 = load_probe_sh(ix0, iy1, iz0);
-    let p011 = load_probe_sh(ix0, iy1, iz1);
-    let p100 = load_probe_sh(ix1, iy0, iz0);
-    let p101 = load_probe_sh(ix1, iy0, iz1);
-    let p110 = load_probe_sh(ix1, iy1, iz0);
-    let p111 = load_probe_sh(ix1, iy1, iz1);
-
-    // Evaluate SH for each probe color
-    let c000 = sh_eval(p000, dir);
-    let c001 = sh_eval(p001, dir);
-    let c010 = sh_eval(p010, dir);
-    let c011 = sh_eval(p011, dir);
-    let c100 = sh_eval(p100, dir);
-    let c101 = sh_eval(p101, dir);
-    let c110 = sh_eval(p110, dir);
-    let c111 = sh_eval(p111, dir);
-    
-    // Trilinear interpolation
-    let c00 = mix(c000, c100, fx);
-    let c01 = mix(c001, c101, fx);
-    let c10 = mix(c010, c110, fx);
-    let c11 = mix(c011, c111, fx);
-    
-    let c0 = mix(c00, c10, fy);
-    let c1 = mix(c01, c11, fy);
-    
-    return mix(c0, c1, fz);
 }
 
 fn storeSHCoefficients(ix: i32, iy: i32, iz: i32, sh: SHCoefficients) {
     let base_z = u32(iz * 9); 
 
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 0u), vec4<f32>(sh.L00, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 1u), vec4<f32>(sh.L1m1, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 2u), vec4<f32>(sh.L10, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 3u), vec4<f32>(sh.L11, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 4u), vec4<f32>(sh.L2m2, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 5u), vec4<f32>(sh.L2m1, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 6u), vec4<f32>(sh.L20, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 7u), vec4<f32>(sh.L21, 0.0));
-    textureStore(probe_texture_write, vec3<u32>(u32(ix), u32(iy), base_z + 8u), vec4<f32>(sh.L22, 0.0));
+    textureStore(sh0Write, vec3<u32>(u32(ix), u32(iy), base_z + 0u), vec4<f32>(sh.L00, 0.0));
+    textureStore(sh1Write, vec3<u32>(u32(ix), u32(iy), base_z + 1u), vec4<f32>(sh.L1m1, 0.0));
+    textureStore(sh2Write, vec3<u32>(u32(ix), u32(iy), base_z + 2u), vec4<f32>(sh.L10, 0.0));
+    textureStore(sh3Write, vec3<u32>(u32(ix), u32(iy), base_z + 3u), vec4<f32>(sh.L11, 0.0));
 }
 
 /// Generates a 3D grid of probe positions within the unit cube [0,1]
@@ -519,6 +450,10 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     var t = t_interval.x;
     var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
 
+            // Update scattered ray position
+        pos = pos + ray_dir * t;
+        var sh_coeffs = load_probe_sh(pos);
+
     if (!event.scattering_event) {
         // Illuminate with an "environment light"
         if (had_any_event) {
@@ -530,10 +465,9 @@ fn fragment_main(in: VertexOutput) -> @location(0) float4 {
     } else {
         had_any_event = true;
 
-        // Update scattered ray position
-        pos = pos + ray_dir * t;
-
-        var radiance = get_interpolated_radiance(pos, ray_dir);
+        //var radiance = sh_eval(sh_coeffs, normalize(pos - params.eye_pos.xyz));
+        var radiance = sh_eval(sh_coeffs, ray_dir);
+        //var radiance = get_interpolated_radiance(pos, ray_dir);
         illum += throughput * radiance;
     }
 
@@ -588,9 +522,16 @@ fn probe_vertex_main(
         f32(probe_y) * step,
         f32(probe_z) * step
     );
-    let probe_sh = load_probe_sh(probe_x, probe_y, probe_z);
+
+
+    let pos = vec3<f32>(f32(probe_x), f32(probe_y), f32(probe_z));
+    output.probe_position = pos;
+    //let probe_sh = load_probe_sh(pos);
     let world_center = probe_pos * params.volume_scale.xyz;
-    let probe_col = sh_eval(probe_sh, normalize(world_center - params.eye_pos.xyz));
+    output.world_center = world_center;
+
+    
+    //let probe_col = sh_eval(probe_sh, normalize(world_center - params.eye_pos.xyz));
 
     //let probe_const_col = probe_data_read[instanceIndex].sh_coeffs.L00;
     let cam_forward = normalize(params.eye_pos.xyz - world_center);
@@ -607,23 +548,6 @@ fn probe_vertex_main(
 
     let worldPos = vec4<f32>(world_center + quad_offset, 1.0);
     output.position = params.proj_view * worldPos;
-    
-    let z = i32(instanceIndex) / (params.probe_density * params.probe_density);
-
-    // Color map for 8 Z-layers
-    let colors = array<vec3<f32>, 8>(
-        vec3<f32>(1.0, 1.0, 1.0), // white
-        vec3<f32>(1.0, 1.0, 0.0), // yellow
-        vec3<f32>(1.0, 0.5, 0.0), // orange
-        vec3<f32>(0.0, 1.0, 0.0), // green
-        vec3<f32>(1.0, 0.0, 0.0), // red
-        vec3<f32>(0.0, 0.0, 1.0), // blue
-        vec3<f32>(1.0, 0.0, 1.0), // pink
-        vec3<f32>(0.0, 0.0, 0.0)  // black
-    );
-    //output.color = colors[z];
-    //output.color = probe_const_col;
-    output.color = probe_col;
 
     return output;
 }
@@ -631,9 +555,10 @@ fn probe_vertex_main(
 
 @fragment
 fn probe_fragment_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    if (params.probe_density == 32) {
-        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
-    }
-    return vec4<f32>(input.color, 1.0);
+    let texCoord = (input.probe_position + vec3<f32>(0.5)) / f32(params.probe_density);
+    let probe_sh = load_probe_sh(texCoord); // ← use textureSample() here
+    let view_dir = normalize(input.world_center - params.eye_pos.xyz);
+    let color = sh_eval(probe_sh, view_dir);
+    return vec4<f32>(color, 1.0);
 }
 
